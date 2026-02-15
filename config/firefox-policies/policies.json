@@ -1,0 +1,10 @@
+{
+  "policies": {
+    "ExtensionSettings": {
+      "{e6e36c9a-8323-446c-b720-a176017e38ff}": {
+        "installation_mode": "force_installed",
+        "install_url": "https://addons.mozilla.org/firefox/downloads/latest/torrent-control/latest.xpi"
+      }
+    }
+  }
+}

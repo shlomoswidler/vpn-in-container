@@ -1,0 +1,27 @@
+# Environment file with credentials
+.env
+
+# Container configuration directories (generated at runtime)
+config/firefox/
+config/qbittorrent/
+
+# Gluetun config contains API key
+config/gluetun/config.toml
+
+# Watch folder contents
+watch/*.torrent
+
+# OS-specific files
+.DS_Store
+**/.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
