@@ -1,0 +1,12 @@
+# Gluetun Control Server Authentication
+# This file configures API access for qSticky to query port forwarding status
+#
+# Copy this to config.toml and replace the apikey with your generated key:
+#   cp config/gluetun/config.toml.example config/gluetun/config.toml
+#   # Then replace REPLACE_WITH_GLUETUN_API_KEY with the key from your .env file
+
+[[roles]]
+name = "qsticky"
+routes = ["GET /v1/portforward", "GET /v1/vpn/status"]
+auth = "apikey"
+apikey = "REPLACE_WITH_GLUETUN_API_KEY"

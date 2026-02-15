@@ -1,0 +1,170 @@
+services:
+  # ===========================================
+  # VPN Container - All traffic routes through this
+  # ===========================================
+  vpn:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun-vpn
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      # Firefox noVNC Web GUI
+      - "5800:5800"
+      # qBittorrent Web UI
+      - "9080:9080"
+    environment:
+      # ProtonVPN with WireGuard
+      - VPN_SERVICE_PROVIDER=protonvpn
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY}
+      # Server selection
+      - SERVER_COUNTRIES=${SERVER_COUNTRIES:-Netherlands}
+      # Port forwarding for better torrent connectivity
+      - VPN_PORT_FORWARDING=on
+      - VPN_PORT_FORWARDING_PROVIDER=protonvpn
+      # Control server for qSticky
+      - HTTP_CONTROL_SERVER_ADDRESS=:8000
+      # Firewall/Kill switch
+      - FIREWALL=on
+      # Timezone
+      - TZ=${TZ:-America/New_York}
+    volumes:
+      - ./config/gluetun:/gluetun
+    restart: always
+    healthcheck:
+      test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # ===========================================
+  # Firefox Browser with noVNC
+  # ===========================================
+  firefox:
+    image: jlesage/firefox:latest
+    container_name: firefox-novnc
+    network_mode: service:vpn
+    depends_on:
+      vpn:
+        condition: service_healthy
+        restart: true
+    environment:
+      # User/Group IDs
+      - "USER_ID=${PUID:?Set PUID in .env (run: id -u)}"
+      - "GROUP_ID=${PGID:?Set PGID in .env (run: id -g)}"
+      # Display settings
+      - DISPLAY_WIDTH=1920
+      - DISPLAY_HEIGHT=1080
+      # No password protection
+      - WEB_AUTHENTICATION=0
+      # Timezone
+      - TZ=${TZ:-America/New_York}
+      # Dark mode
+      - DARK_MODE=1
+      # Always use private browsing mode
+      - FF_PREF_PRIVATE_BROWSING=browser.privatebrowsing.autostart:true
+    volumes:
+      # Firefox configuration persistence
+      - ./config/firefox:/config:rw
+      # Download folder (also serves as qBittorrent watch folder for .torrent handoff)
+      - ${DOWNLOADS_PATH:-${HOME}/Downloads/vpn-in-container}/downloads:/config/downloads:rw
+      # Firefox policies (force-installs Torrent Control extension)
+      - ./config/firefox-policies/policies.json:/etc/firefox/policies/policies.json:ro
+    shm_size: "2gb"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --timeout=5 http://localhost:5800 > /dev/null 2>&1 && wget -qO- --timeout=5 https://1.1.1.1 > /dev/null 2>&1"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 90s
+
+  # ===========================================
+  # qBittorrent Torrent Client
+  # ===========================================
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    network_mode: service:vpn
+    depends_on:
+      vpn:
+        condition: service_healthy
+        restart: true
+    environment:
+      - "PUID=${PUID:?Set PUID in .env (run: id -u)}"
+      - "PGID=${PGID:?Set PGID in .env (run: id -g)}"
+      - TZ=${TZ:-America/New_York}
+      - WEBUI_PORT=9080
+    volumes:
+      # qBittorrent configuration
+      - ./config/qbittorrent:/config
+      # Custom init scripts (disables WebUI auth for private networks)
+      - ./config/qbittorrent-init.d:/custom-cont-init.d:ro
+      # Completed downloads (mapped to host folder)
+      - ${DOWNLOADS_PATH:-${HOME}/Downloads/vpn-in-container}:/downloads
+      # Watch folder for auto-adding .torrent files (shared with Firefox downloads)
+      - ${DOWNLOADS_PATH:-${HOME}/Downloads/vpn-in-container}/downloads:/watch
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf --max-time 5 http://localhost:9080/api/v2/app/version && curl -sf --max-time 5 https://1.1.1.1 > /dev/null"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 90s
+
+  # ===========================================
+  # qSticky - Automatic Port Forwarding Sync
+  # ===========================================
+  qsticky:
+    image: ghcr.io/monstermuffin/qsticky:latest
+    container_name: qsticky
+    network_mode: service:vpn
+    depends_on:
+      vpn:
+        condition: service_healthy
+        restart: true
+      qbittorrent:
+        condition: service_healthy
+        restart: true
+    environment:
+      # qBittorrent connection (localhost since we share VPN network)
+      - QBITTORRENT_HOST=localhost
+      - QBITTORRENT_PORT=9080
+      - QBITTORRENT_USER=admin
+      - QBITTORRENT_PASS=${QBITTORRENT_PASS:-adminadmin}
+      - QBITTORRENT_HTTPS=false
+      # Gluetun connection (localhost since we share VPN network)
+      - GLUETUN_HOST=localhost
+      - GLUETUN_PORT=8000
+      - GLUETUN_AUTH_TYPE=apikey
+      - GLUETUN_APIKEY=${GLUETUN_API_KEY}
+      # Check interval
+      - CHECK_INTERVAL=30
+      - LOG_LEVEL=INFO
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '(echo > /dev/tcp/localhost/8000) 2>/dev/null && (echo > /dev/tcp/localhost/9080) 2>/dev/null || exit 1'"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+  # ===========================================
+  # Autoheal - Restarts unhealthy containers
+  # ===========================================
+  autoheal:
+    image: willfarrell/autoheal:latest
+    container_name: autoheal
+    restart: always
+    network_mode: none
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=all
+      - AUTOHEAL_INTERVAL=10
+      - AUTOHEAL_START_PERIOD=120
+      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=30
+      - TZ=${TZ:-America/New_York}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
