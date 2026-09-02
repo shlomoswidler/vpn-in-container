@@ -39,7 +39,7 @@ A Docker Compose stack providing a privacy-focused, containerized browsing envir
               ▼
   ~/Downloads/vpn-in-container/
 
-  [Autoheal] ── monitors all containers via Docker socket
+  [Autoheal] ── monitors this stack's containers via Docker socket
               ── restarts any that become unhealthy
 ```
 
@@ -216,6 +216,12 @@ The stack automatically recovers from host sleep, reboot, or VPN disconnects usi
 | Autoheal | Built-in | 5s |
 
 **Layer 2 -- Autoheal** monitors Docker for unhealthy containers and restarts them.
+
+Autoheal is scoped to this project only: it runs with `AUTOHEAL_CONTAINER_LABEL=autoheal`
+and each service in this stack carries the `autoheal=true` label. Unhealthy containers
+belonging to other Docker Compose projects on the same host are ignored. (Do **not** set
+`AUTOHEAL_CONTAINER_LABEL=all` -- that makes autoheal restart every unhealthy container on
+the machine.)
 
 **Recovery flow**: VPN drops → health checks fail on dependent services → autoheal restarts them → they rejoin the recovered VPN namespace → all services return to healthy (~3-4 minutes).
 

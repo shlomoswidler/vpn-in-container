@@ -32,6 +32,10 @@ services:
       - TZ=${TZ:-America/New_York}
     volumes:
       - ./config/gluetun:/gluetun
+    labels:
+      # Opt-in marker for this project's autoheal instance (see autoheal service).
+      # Scopes autoheal to these siblings only, never other stacks on this host.
+      - "autoheal=true"
     restart: always
     healthcheck:
       test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
@@ -74,6 +78,10 @@ services:
       # Firefox policies (force-installs Torrent Control extension)
       - ./config/firefox-policies/policies.json:/etc/firefox/policies/policies.json:ro
     shm_size: "2gb"
+    labels:
+      # Opt-in marker for this project's autoheal instance (see autoheal service).
+      # Scopes autoheal to these siblings only, never other stacks on this host.
+      - "autoheal=true"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- --timeout=5 http://localhost:5800 > /dev/null 2>&1 && wget -qO- --timeout=5 https://1.1.1.1 > /dev/null 2>&1"]
@@ -107,6 +115,10 @@ services:
       - ${DOWNLOADS_PATH:-${HOME}/Downloads/vpn-in-container}:/downloads
       # Watch folder for auto-adding .torrent files (shared with Firefox downloads)
       - ${DOWNLOADS_PATH:-${HOME}/Downloads/vpn-in-container}/downloads:/watch
+    labels:
+      # Opt-in marker for this project's autoheal instance (see autoheal service).
+      # Scopes autoheal to these siblings only, never other stacks on this host.
+      - "autoheal=true"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -sf --max-time 5 http://localhost:9080/api/v2/app/version && curl -sf --max-time 5 https://1.1.1.1 > /dev/null"]
@@ -144,6 +156,10 @@ services:
       # Check interval
       - CHECK_INTERVAL=30
       - LOG_LEVEL=INFO
+    labels:
+      # Opt-in marker for this project's autoheal instance (see autoheal service).
+      # Scopes autoheal to these siblings only, never other stacks on this host.
+      - "autoheal=true"
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "bash -c '(echo > /dev/tcp/localhost/8000) 2>/dev/null && (echo > /dev/tcp/localhost/9080) 2>/dev/null || exit 1'"]
@@ -161,7 +177,10 @@ services:
     restart: always
     network_mode: none
     environment:
-      - AUTOHEAL_CONTAINER_LABEL=all
+      # Only heal containers labelled `autoheal=true` (this project's services).
+      # `all` would restart every unhealthy container on the host, including
+      # containers belonging to unrelated Docker Compose projects.
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
       - AUTOHEAL_INTERVAL=10
       - AUTOHEAL_START_PERIOD=120
       - AUTOHEAL_DEFAULT_STOP_TIMEOUT=30
