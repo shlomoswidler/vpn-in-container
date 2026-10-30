@@ -35,8 +35,8 @@ const cursor = new Cursor();
 cursor.attach(target);
 
 const failures = [];
-for (const { name, expected, rgba, w, h } of cases) {
-    cursor.change(rgba, 0, 0, w, h);
+for (const { name, expected, rgba, w, h, hotx = 0, hoty = 0 } of cases) {
+    cursor.change(rgba, hotx, hoty, w, h);
     const inline = target.style.cursor;
     const computed = getComputedStyle(target).cursor;
     let ok;
