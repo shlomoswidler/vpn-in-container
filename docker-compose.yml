@@ -75,6 +75,12 @@ services:
       - FF_PREF_PRIVATE_BROWSING=browser.privatebrowsing.autostart=true
       # Load config/firefox-chrome/userChrome.css (mounted below)
       - FF_PREF_USERCHROME=toolkit.legacyUserProfileCustomizations.stylesheets=true
+      # Single window: a tab dropped outside the tab strip stays put. Firefox would otherwise
+      # un-maximize the window (only tab) or open a new one (see config/firefox-autoconfig/).
+      - FF_PREF_TAB_DETACH=browser.tabs.allowTabDetach=false
+      # Pages' window.open() popups open as tabs, and pages can't move or resize windows
+      - FF_PREF_POPUPS_IN_TABS=browser.link.open_newwindow.restriction=0
+      - FF_PREF_NO_WINDOW_MOVE_RESIZE=dom.disable_window_move_resize=true
       # Marker cursor theme (mounted below): each cursor names a CSS cursor keyword, and the
       # patched noVNC shows the viewer's own native cursor for it (see config/cursors/README.md).
       # The size must match NOMINAL_SIZE in config/cursors/generate_native_theme.py.
@@ -100,6 +106,12 @@ services:
       - ./config/firefox-chrome/userChrome.css:/config/profile/chrome/userChrome.css:ro
       # Removes Openbox's Alt+drag move/resize bindings (1-bit cursors; Alt+Right unmaximizes)
       - ./config/firefox-init.d/58-openbox-no-alt-drag.sh:/etc/cont-init.d/58-openbox-no-alt-drag.sh:ro
+      # Single window: moves the tabs of any new browser window into the first one
+      - ./config/firefox-autoconfig/autoconfig.js:/usr/lib/firefox/defaults/pref/autoconfig.js:ro
+      - ./config/firefox-autoconfig/single-window.cfg:/usr/lib/firefox/single-window.cfg:ro
+      # Single window: clears Ctrl+N, Ctrl+Shift+P, Ctrl+Shift+N and Ctrl+Shift+W (Ctrl+Q stays:
+      # the image's shutdown script sends it)
+      - ./config/firefox-profile/customKeys.json:/config/profile/customKeys.json:ro
     shm_size: "2gb"
     labels:
       # Opt-in marker for this project's autoheal instance (see autoheal service).

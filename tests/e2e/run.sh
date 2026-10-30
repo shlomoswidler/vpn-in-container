@@ -22,6 +22,10 @@
 # its title bar, edges and title-bar drag show Openbox core glyphs the patched
 # noVNC recognizes (config/novnc/core-glyphs.js).
 #
+# Scenario 5 checks that Firefox stays one maximized window: tab drags out of the
+# strip, new-window shortcuts and window-closing shortcuts (config/firefox-autoconfig/,
+# config/firefox-profile/customKeys.json and the single-window FF_PREF_* entries).
+#
 # Usage: tests/e2e/run.sh   (needs docker, python3 and node on the host)
 
 set -euo pipefail
@@ -315,6 +319,67 @@ check_point library-top-edge "$center_x" $((lib_y - 18)) glyph:n-resize
 check_point library-bottom-edge "$center_x" $((lib_y + lib_h + 1)) glyph:s-resize
 check_drag library-title-drag none 1 "$center_x" $((lib_y - 10)) \
     $((center_x + 100)) $((lib_y + 90)) glyph:move
+
+# Drags with the left button from (X,Y) to (X2,Y2) in 20 steps, as a person would.
+drag() {
+    local x=$1 y=$2 x2=$3 y2=$4 step
+    in_x xdotool mousemove "$x" "$y"
+    sleep 0.5
+    in_x xdotool mousedown 1
+    sleep 0.3
+    for step in $(seq 1 20); do
+        in_x xdotool mousemove $((x + (x2 - x) * step / 20)) $((y + (y2 - y) * step / 20))
+        sleep 0.05
+    done
+    sleep 0.8
+    in_x xdotool mouseup 1
+}
+
+# Runs the remaining arguments as a command, then checks that Firefox still has
+# exactly one browser window, the original one, maximized at 0,0 over the whole
+# display, and that the container is still running (closing Firefox's last
+# window stops the container).
+check_single_window() {
+    local label=$1 windows geometry
+    shift
+    checks=$((checks + 1))
+    "$@" || true
+    sleep 3
+    if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" != true ]]; then
+        printf 'FAIL  %-22s the container stopped (Firefox exited)\n' "$label"
+        failures=$((failures + 1))
+        return
+    fi
+    windows=$(in_x xdotool search --onlyvisible --classname Navigator 2>/dev/null |
+        paste -sd ' ' -) || true
+    geometry=$(in_x xdotool getwindowgeometry "$WINDOW" 2>/dev/null |
+        tr -s ' ' | paste -sd ' ' -) || true
+    if [[ "$windows" == "$WINDOW" &&
+        "$geometry" == *"Position: 0,0 "*"Geometry: $(display_size)"* ]]; then
+        printf 'ok    %-22s %s\n' "$label" "$geometry"
+    else
+        printf 'FAIL  %-22s windows: %s main: %s\n' "$label" "$windows" "$geometry"
+        failures=$((failures + 1))
+    fi
+}
+
+# Firefox is a single window here: dropping a tab outside the tab strip must not
+# un-maximize the window or open a new one, new-window shortcuts must not open
+# one, and the window-closing shortcuts must not close the only one.
+echo "== scenario 5: Firefox stays one maximized window"
+start_firefox_windowed
+in_x xdotool windowactivate --sync "$WINDOW"
+# Coordinates assume the 1920x1080 display; the first tab's handle is at (100,20).
+check_single_window only-tab-dragged-down drag 100 20 1500 600
+check_single_window only-tab-dragged-left drag 100 20 300 700
+check_single_window ctrl-n in_x xdotool key ctrl+n
+check_single_window ctrl-shift-p in_x xdotool key ctrl+shift+p
+in_x xdotool windowactivate --sync "$WINDOW" key ctrl+t
+sleep 1.5
+check_single_window second-tab-torn-off drag 100 20 1500 600
+# These come last: a failure here closes Firefox and stops the container.
+check_single_window ctrl-shift-w in_x xdotool key ctrl+shift+w
+check_single_window ctrl-w-every-tab in_x xdotool key ctrl+w sleep 1 key ctrl+w sleep 1 key ctrl+w
 
 if ((failures > 0)); then
     echo "$failures of $checks check(s) failed"

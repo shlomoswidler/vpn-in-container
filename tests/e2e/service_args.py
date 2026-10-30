@@ -3,7 +3,8 @@
 into the image name (first line) and `docker run` arguments (one per line)
 that reproduce its browser setup: the XCURSOR_*, display and FF_PREF_*
 environment variables, and the read-only mounts under the cursor-related
-directories and the Firefox profile's chrome/ folder (userChrome.css).
+directories, the Firefox profile (userChrome.css, customKeys.json) and the
+Firefox install directory (autoconfig).
 """
 
 import json
@@ -16,6 +17,8 @@ MOUNT_PREFIXES = (
     "/opt/noVNC/",
     "/etc/cont-init.d/",
     "/config/profile/chrome/",
+    "/config/profile/customKeys.json",
+    "/usr/lib/firefox/",
 )
 
 

@@ -137,6 +137,23 @@ docker compose stop
 | Firefox | http://localhost:5800 | Browser (no password) |
 | qBittorrent | http://localhost:9080 | Torrent client (no password from host) |
 
+### How Firefox Behaves in the Container
+
+- **Private browsing, always:** history, cookies and site data are not kept.
+- **Your own mouse cursors:** the web UI shows your computer's native cursors
+  (see [config/cursors/README.md](config/cursors/README.md)).
+- **One window:** Firefox stays a single maximized window, since the container
+  has no way to switch between windows.
+  - Dropping a tab outside the tab strip leaves it where it was.
+  - Pop-ups, Shift+click and "Open in New Window" open tabs instead.
+  - Ctrl+N, Ctrl+Shift+P, Ctrl+Shift+N and Ctrl+Shift+W do nothing, and the menu
+    items that open or close windows are hidden.
+  - Ctrl+Q still quits Firefox (the image's shutdown script relies on it); the
+    container then stops and restarts.
+  - Settings: the single-window `FF_PREF_*` entries in `docker-compose.yml`,
+    `config/firefox-autoconfig/`, `config/firefox-profile/customKeys.json` and
+    `config/firefox-chrome/userChrome.css`.
+
 ### Configure Torrent Control (First Time Only)
 
 The Torrent Control extension is pre-installed. Configure it once to enable one-click magnet links:
@@ -384,8 +401,13 @@ vpn-in-container/
 │   │   ├── config.toml.example  # Template for API authentication
 │   │   └── config.toml          # Your API key (gitignored)
 │   ├── firefox/            # Browser profile (gitignored)
+│   ├── firefox-autoconfig/
+│   │   ├── autoconfig.js   # Loads single-window.cfg (Firefox autoconfig)
+│   │   └── single-window.cfg  # Moves any second window's tabs into the first window
 │   ├── firefox-chrome/
-│   │   └── userChrome.css  # Turns off window dragging from toolbars (Openbox move cursor)
+│   │   └── userChrome.css  # No toolbar window dragging; hides new/close window menu items
+│   ├── firefox-profile/
+│   │   └── customKeys.json # Clears the new-window and close-window shortcuts
 │   ├── firefox-init.d/
 │   │   ├── 57-openbox-no-keepborder.sh  # Removes the 1px top border (unthemed cursor strip)
 │   │   └── 58-openbox-no-alt-drag.sh    # Removes Openbox's Alt+drag move/resize bindings
