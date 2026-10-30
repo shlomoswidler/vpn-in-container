@@ -8,6 +8,10 @@ config/qbittorrent/
 # Gluetun config contains API key
 config/gluetun/config.toml
 
+# Gluetun's VPN server list: runtime data it rewrites on start (v3.42+ keeps it in servers/)
+config/gluetun/servers.json
+config/gluetun/servers/
+
 # Watch folder contents
 watch/*.torrent
 
