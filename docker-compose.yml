@@ -29,6 +29,10 @@ services:
       - VPN_PORT_FORWARDING_PROVIDER=protonvpn
       # Control server for qSticky
       - HTTP_CONTROL_SERVER_ADDRESS=:8000
+      # Our auth file (API key roles for qSticky) is config/gluetun/config.toml, mounted at
+      # /gluetun/config.toml; Gluetun's default path is /gluetun/auth/config.toml, which would
+      # leave every route unauthenticated.
+      - HTTP_CONTROL_SERVER_AUTH_CONFIG_FILEPATH=/gluetun/config.toml
       # Firewall/Kill switch
       - FIREWALL=on
       # Timezone

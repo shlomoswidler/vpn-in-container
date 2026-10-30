@@ -211,6 +211,20 @@ if [[ "$vpn_status" == running ]]; then
 else
     fail "Gluetun /v1/vpn/status: '$vpn_status'"
 fi
+# The control server must refuse requests without the right API key.
+for route in /v1/portforward /v1/vpn/status; do
+    for key in none wrong; do
+        header=""
+        [[ "$key" == wrong ]] && header="X-API-Key: wrong-$TEST_ID"
+        code=$(docker exec "$QBT" curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+            ${header:+-H "$header"} "http://localhost:8000$route" 2>/dev/null || true)
+        if [[ "$code" == 401 ]]; then
+            pass "Gluetun control server refuses $route with $key API key (401)"
+        else
+            fail "Gluetun control server answered $route with $key API key: HTTP $code"
+        fi
+    done
+done
 forwarded=$(docker exec -e GLUETUN_API_KEY "$QBT" sh -c \
     'curl -s --max-time 10 -H "X-API-Key: $GLUETUN_API_KEY" http://localhost:8000/v1/portforward' \
     2>/dev/null | json_get port 2>/dev/null || echo 0)
