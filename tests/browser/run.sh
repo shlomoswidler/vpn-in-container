@@ -35,7 +35,7 @@ mkdir -p "$WORK/site/core/util" "$WORK/profiles"
 CONTAINER=$(docker create "$IMAGE")
 docker cp -q "$CONTAINER:/opt/noVNC/core" "$WORK/site/"
 docker cp -q "$CONTAINER:/opt/noVNC/vendor" "$WORK/site/"
-for file in cursor.js cursor-keyword.js; do
+for file in cursor.js cursor-keyword.js core-glyphs.js; do
     cp "$REPO/config/novnc/$file" "$WORK/site/core/util/$file"
 done
 cp "$BROWSER_DIR/harness.html" "$WORK/site/"

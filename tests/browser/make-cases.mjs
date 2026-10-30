@@ -2,6 +2,8 @@
 // each with the CSS cursor value Cursor.change() is expected to produce.
 //   - every file in config/cursors/native-css (keyword files and aliases):
 //     the keyword the file, or its symlink target, is named for
+//   - Openbox's core glyphs (config/novnc/core-glyphs.js), as the VNC server
+//     sends them: the keyword each glyph maps to
 //   - ordinary images (tests/fixtures/ordinary-cursors.mjs): a url() image cursor
 //   - an empty (0x0) cursor: "none"
 // Image and empty cases are interleaved with markers to check that switching
@@ -12,6 +14,7 @@ import { readFileSync, readdirSync, lstatSync, realpathSync, writeFileSync } fro
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { CORE_GLYPHS } from '../../config/novnc/core-glyphs.js';
 import { arrowCursor, lineCursors } from '../fixtures/ordinary-cursors.mjs';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -46,6 +49,16 @@ for (const file of readdirSync(themeCursors).sort()) {
         cases.push(empty);
     }
 }
+
+// Transparent pixels arrive from TigerVNC as (1, 1, 1, 0).
+const glyphPixels = { '.': [1, 1, 1, 0], '#': [0, 0, 0, 255], 'W': [255, 255, 255, 255] };
+CORE_GLYPHS.forEach(({ glyph, keyword, w, h, hotx, hoty, rows }, i) => {
+    const rgba = rows.join('').split('').flatMap(c => glyphPixels[c]);
+    cases.push({ name: `core glyph ${glyph}`, expected: keyword, w, h, hotx, hoty, rgba });
+    if (i % 4 === 0) {
+        cases.push(images[nextImage++ % images.length]);
+    }
+});
 
 const [outFile] = process.argv.slice(2);
 writeFileSync(outFile, `export default ${JSON.stringify(cases)};\n`);

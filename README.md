@@ -392,14 +392,17 @@ vpn-in-container/
 │   ├── firefox-policies/
 │   │   └── policies.json   # Pre-installs Torrent Control extension
 │   ├── novnc/
-│   │   ├── cursor.js       # Patched noVNC cursor: shows native cursors for markers
-│   │   └── cursor-keyword.js  # Decodes native-css marker cursors
+│   │   ├── cursor.js       # Patched noVNC cursor: shows native cursors
+│   │   ├── cursor-keyword.js  # Recognizes marker cursors and Openbox's core glyphs
+│   │   ├── core-glyphs.js  # Openbox's 11 core glyphs as the VNC server sends them
+│   │   └── core-glyphs/capture.sh  # Regenerates core-glyphs.js from the pinned image
 │   ├── qbittorrent/        # Torrent client config (gitignored)
 │   └── qbittorrent-init.d/
 │       └── 10-configure-qbittorrent.sh  # Auto-configures qBittorrent settings
 ├── tests/
 │   ├── cursor-keyword.test.mjs        # node --test tests/
 │   ├── test_generate_native_theme.py  # python3 -m unittest discover -s tests
+│   ├── test_make_core_glyph_table.py
 │   ├── e2e/run.sh          # Real Firefox + VNC server cursor test (Docker)
 │   └── browser/run.sh      # Patched noVNC in headless Chrome and Firefox
 

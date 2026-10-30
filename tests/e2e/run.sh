@@ -18,6 +18,10 @@
 # of these may start an Openbox move or resize, which would show Openbox's
 # 1-bit cursors (and Alt+Right drag would unmaximize Firefox).
 #
+# Scenario 4 opens the Library window, which Openbox decorates, and checks that
+# its title bar, edges and title-bar drag show Openbox core glyphs the patched
+# noVNC recognizes (config/novnc/core-glyphs.js).
+#
 # Usage: tests/e2e/run.sh   (needs docker, python3 and node on the host)
 
 set -euo pipefail
@@ -263,6 +267,54 @@ check_drag tab-strip-gutter none 1 1000 20 1150 22 default
 check_drag toolbar-space none 1 1750 64 1780 66 default
 check_drag alt-left-drag alt 1 900 500 1100 600 default
 check_drag alt-right-drag alt 3 1500 800 1200 600 default
+
+# Hovers (X,Y) and checks the cursor's classification equals EXPECTED.
+check_point() {
+    local label=$1 x=$2 y=$3 expected=$4 summary actual
+    checks=$((checks + 1))
+    summary=$(docker run --rm --network "container:$CONTAINER" \
+        -v "$E2E_DIR:/e2e:ro" -v "$WORK:/out" "$PROBE_IMAGE" \
+        python -I /e2e/rfb_cursor_probe.py 127.0.0.1 5900 "$x" "$y" "/out/$label")
+    actual=$(node "$E2E_DIR/decode.mjs" "$summary" "$WORK/$label.rgba")
+    if [[ "$actual" == "$expected" ]]; then
+        printf 'ok    %-20s %-16s (%d,%d)\n' "$label" "$actual" "$x" "$y"
+    else
+        printf 'FAIL  %-20s expected %-16s got %-16s (%d,%d) %s\n' \
+            "$label" "$expected" "$actual" "$x" "$y" "$summary"
+        failures=$((failures + 1))
+    fi
+}
+
+# Openbox decorates secondary windows such as the Library, and its title bar,
+# edges and title-bar drag use Openbox's 1-bit core glyphs. The patched noVNC
+# must recognize each (decode.mjs reports "glyph:<keyword>"). Continues in the
+# scenario 3 container.
+echo "== scenario 4: Openbox's own cursors on a decorated window are recognized"
+in_x xdotool windowactivate --sync "$WINDOW" key ctrl+shift+o
+LIBRARY=""
+for _ in $(seq 1 20); do
+    LIBRARY=$(in_x xdotool search --name '^Library$' 2>/dev/null | head -n 1) || true
+    [[ -n "$LIBRARY" ]] && break
+    sleep 0.5
+done
+if [[ -z "$LIBRARY" ]]; then
+    echo "FAIL: the Library window did not open" >&2
+    exit 1
+fi
+sleep 2
+# Client area position and size; Openbox's frame surrounds it.
+read -r lib_x lib_y lib_w lib_h < <(in_x xdotool getwindowgeometry "$LIBRARY" \
+    | sed -n -e 's/.*Position: \([0-9]*\),\([0-9]*\).*/\1 \2/p' \
+        -e 's/.*Geometry: \([0-9]*\)x\([0-9]*\).*/\1 \2/p' | paste -sd ' ' -)
+center_x=$((lib_x + lib_w / 2))
+# Measured on v26.09.1 (Library client area at 1,20): the title bar covers
+# 2-15 px above the client area, the top resize edge is the frame's top row,
+# and the bottom resize edge covers 0-2 px below the client area.
+check_point library-title-bar "$center_x" $((lib_y - 10)) glyph:default
+check_point library-top-edge "$center_x" $((lib_y - 18)) glyph:n-resize
+check_point library-bottom-edge "$center_x" $((lib_y + lib_h + 1)) glyph:s-resize
+check_drag library-title-drag none 1 "$center_x" $((lib_y - 10)) \
+    $((center_x + 100)) $((lib_y + 90)) glyph:move
 
 if ((failures > 0)); then
     echo "$failures of $checks check(s) failed"
