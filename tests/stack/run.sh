@@ -234,14 +234,30 @@ if [[ "$forwarded" =~ ^[0-9]+$ ]] && ((forwarded > 0)) && [[ "$listen" == "$forw
 else
     fail "forwarded port '$forwarded', qBittorrent listen port '$listen'"
 fi
-# qSticky's log since it started: logged in to qBittorrent, and no errors
-# (qBittorrent 5.2+ answers login with 204, which older qSticky rejected).
+# qSticky's log since it started: it logged in to qBittorrent, and any error
+# (for example while qBittorrent was restarting) was followed by a successful
+# login or port update. qBittorrent 5.2+ answers login with 204, which older
+# qSticky rejected: that shows as errors with no success after them.
 qsticky_log=$(docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' "$QSTICKY")" "$QSTICKY" 2>&1 || true)
-qsticky_errors=$(grep -E ' - (ERROR|CRITICAL) - |Login failed' <<<"$qsticky_log" | tail -n 3 || true)
-if grep -q 'Successfully logged in to qBittorrent' <<<"$qsticky_log" && [[ -z "$qsticky_errors" ]]; then
+qsticky_verdict=$(python3 -I -c '
+import re, sys
+lines = sys.stdin.read().splitlines()
+error = re.compile(r" - (ERROR|CRITICAL) - |Login failed")
+success = re.compile(r"Successfully (logged in to qBittorrent|updated port)|already set correctly")
+errors = [i for i, line in enumerate(lines) if error.search(line)]
+successes = [i for i, line in enumerate(lines) if success.search(line)]
+if not any("Successfully logged in to qBittorrent" in line for line in lines):
+    print("FAIL no successful login to qBittorrent")
+elif errors and not any(i > errors[-1] for i in successes):
+    print("FAIL " + lines[errors[-1]])
+else:
+    print(f"OK {len(errors)}")' <<<"$qsticky_log")
+if [[ "$qsticky_verdict" == "OK 0" ]]; then
     pass "qSticky logged in to qBittorrent with no errors since it started"
+elif [[ "$qsticky_verdict" == OK* ]]; then
+    pass "qSticky logged in to qBittorrent; it recovered from ${qsticky_verdict#OK } error(s)"
 else
-    fail "qSticky log: ${qsticky_errors:-no successful login}"
+    fail "qSticky log: ${qsticky_verdict#FAIL }"
 fi
 if [[ "$forwarded" =~ ^[0-9]+$ ]] && ((forwarded > 0)); then
     check_interval=$(compose_value qsticky env:CHECK_INTERVAL)

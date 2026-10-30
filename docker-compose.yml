@@ -137,7 +137,9 @@ services:
   # ===========================================
   qbittorrent:
     # Pinned by tag and digest; upgrade deliberately and run tests/stack/run.sh.
-    image: lscr.io/linuxserver/qbittorrent:5.1.4-r1-ls436@sha256:95114034a7f74672b76f795f6938921b0ca795f85b59b48691035dc66714f34c
+    # 5.3.0 with libtorrent 2.1.2 (the _v2.1.2 part of the tag). The short 5.3.0 tag does not
+    # pin libtorrent. Downgrading loses the WebUI password (5.1 can't read the [WebUI] section).
+    image: lscr.io/linuxserver/qbittorrent:5.3.0_v2.1.2-ls485@sha256:75ecbb1c89ab7b0a21c4bde40b4820e4f1649d2d56d83b91913422155e8d2a5f
     container_name: qbittorrent
     network_mode: service:vpn
     depends_on:
