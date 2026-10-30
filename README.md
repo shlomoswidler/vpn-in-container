@@ -376,15 +376,29 @@ vpn-in-container/
 ├── .env                    # Your credentials (gitignored)
 ├── .env.example            # Template
 ├── config/
+│   ├── cursors/
+│   │   ├── README.md       # How native cursors work; upgrading the image
+│   │   ├── generate_native_theme.py  # Generates native-css/
+│   │   └── native-css/     # Marker cursor theme (shows your OS's native cursors)
 │   ├── gluetun/
 │   │   ├── config.toml.example  # Template for API authentication
 │   │   └── config.toml          # Your API key (gitignored)
 │   ├── firefox/            # Browser profile (gitignored)
+│   ├── firefox-init.d/
+│   │   └── 57-openbox-no-keepborder.sh  # Removes the 1px top border (unthemed cursor strip)
 │   ├── firefox-policies/
 │   │   └── policies.json   # Pre-installs Torrent Control extension
+│   ├── novnc/
+│   │   ├── cursor.js       # Patched noVNC cursor: shows native cursors for markers
+│   │   └── cursor-keyword.js  # Decodes native-css marker cursors
 │   ├── qbittorrent/        # Torrent client config (gitignored)
 │   └── qbittorrent-init.d/
 │       └── 10-configure-qbittorrent.sh  # Auto-configures qBittorrent settings
+├── tests/
+│   ├── cursor-keyword.test.mjs        # node --test tests/
+│   ├── test_generate_native_theme.py  # python3 -m unittest discover -s tests
+│   ├── e2e/run.sh          # Real Firefox + VNC server cursor test (Docker)
+│   └── browser/run.sh      # Patched noVNC in headless Chrome and Firefox
 
 ~/Downloads/vpn-in-container/           # Host downloads directory
 ├── downloads/              # Firefox downloads + .torrent file handoff

@@ -25,3 +25,6 @@ Desktop.ini
 
 # Logs
 *.log
+
+# Python bytecode caches (created by running the tests)
+__pycache__/

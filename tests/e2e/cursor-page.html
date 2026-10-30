@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>native cursor e2e</title>
+<style>
+html, body { margin: 0; padding: 0; overflow: hidden; font: 12px sans-serif; }
+#grid { position: absolute; left: 0; top: 0; display: grid;
+        grid-template-columns: repeat(6, 320px); grid-auto-rows: 135px; }
+#grid div { box-sizing: border-box; border: 1px solid #888; padding: 2px; }
+</style>
+</head>
+<body>
+<!-- One 320x135 cell per case, six per row, in the order run.sh hovers them.
+     Labels sit in the top-left corner so the cell center has no text. -->
+<div id="grid">
+<div style="cursor: default">default</div>
+<div style="cursor: context-menu">context-menu</div>
+<div style="cursor: help">help</div>
+<div style="cursor: pointer">pointer</div>
+<div style="cursor: progress">progress</div>
+<div style="cursor: wait">wait</div>
+<div style="cursor: cell">cell</div>
+<div style="cursor: crosshair">crosshair</div>
+<div style="cursor: text">text</div>
+<div style="cursor: vertical-text">vertical-text</div>
+<div style="cursor: alias">alias</div>
+<div style="cursor: copy">copy</div>
+<div style="cursor: move">move</div>
+<div style="cursor: no-drop">no-drop</div>
+<div style="cursor: not-allowed">not-allowed</div>
+<div style="cursor: grab">grab</div>
+<div style="cursor: grabbing">grabbing</div>
+<div style="cursor: all-scroll">all-scroll</div>
+<div style="cursor: col-resize">col-resize</div>
+<div style="cursor: row-resize">row-resize</div>
+<div style="cursor: n-resize">n-resize</div>
+<div style="cursor: e-resize">e-resize</div>
+<div style="cursor: s-resize">s-resize</div>
+<div style="cursor: w-resize">w-resize</div>
+<div style="cursor: ne-resize">ne-resize</div>
+<div style="cursor: nw-resize">nw-resize</div>
+<div style="cursor: se-resize">se-resize</div>
+<div style="cursor: sw-resize">sw-resize</div>
+<div style="cursor: ew-resize">ew-resize</div>
+<div style="cursor: ns-resize">ns-resize</div>
+<div style="cursor: nesw-resize">nesw-resize</div>
+<div style="cursor: nwse-resize">nwse-resize</div>
+<div style="cursor: zoom-in">zoom-in</div>
+<div style="cursor: zoom-out">zoom-out</div>
+<div style="cursor: auto">auto</div>
+<div style="cursor: -moz-grab">-moz-grab</div>
+<div style="cursor: none">none</div>
+<div style="cursor: url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2216%22 height=%2216%22><rect width=%2216%22 height=%2216%22 fill=%22red%22/></svg>') 0 0, auto">custom image</div>
+</div>
+</body>
+</html>
