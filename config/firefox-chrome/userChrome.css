@@ -1,0 +1,8 @@
+/* Dragging empty toolbar or tab-strip space makes Firefox ask the window
+   manager to move its window (the toolbar rule in toolkit's xul.css). Openbox
+   then grabs the pointer with its 1-bit core "fleur" cursor, because this
+   static build has no Xcursor support, and the maximized window can't move
+   anyway. Turn window dragging off everywhere. */
+* {
+    -moz-window-dragging: no-drag !important;
+}
