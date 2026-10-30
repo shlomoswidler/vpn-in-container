@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>cursor harness: running</title>
+<style>
+html, body { margin: 0; height: 100%; }
+body.pass { background: rgb(0, 160, 0); }
+body.fail { background: rgb(200, 0, 0); }
+#target { width: 200px; height: 100px; }
+</style>
+</head>
+<body>
+<div id="target"></div>
+<pre id="result"></pre>
+<script>
+// Any script or module-loading error fails the run visibly.
+function reportError(message) {
+    document.body.className = 'fail';
+    document.title = 'cursor harness: FAIL';
+    document.getElementById('result').textContent = JSON.stringify({ error: String(message) });
+}
+window.addEventListener('error', e => reportError(e.message || (e.target && e.target.src)), true);
+window.addEventListener('unhandledrejection', e => reportError(e.reason));
+</script>
+<script type="module">
+// Runs noVNC's real Cursor class (with the repo's patch) against cases.js.
+// All imports are static, so the checks finish before the load event and a
+// headless --screenshot or --dump-dom sees the final state.
+import Cursor from './core/util/cursor.js';
+import cases from './cases.js';
+
+const target = document.getElementById('target');
+const cursor = new Cursor();
+cursor.attach(target);
+
+const failures = [];
+for (const { name, expected, rgba, w, h } of cases) {
+    cursor.change(rgba, 0, 0, w, h);
+    const inline = target.style.cursor;
+    const computed = getComputedStyle(target).cursor;
+    let ok;
+    if (expected === 'image') {
+        ok = inline.startsWith('url("data:image/png;base64,') && inline.endsWith(', default');
+    } else {
+        // The computed value proves the browser accepted the keyword.
+        ok = inline === expected && computed === expected;
+    }
+    if (!ok) {
+        failures.push({ name, expected, inline: inline.slice(0, 60), computed: computed.slice(0, 60) });
+    }
+}
+
+const passed = failures.length === 0;
+document.body.className = passed ? 'pass' : 'fail';
+document.title = `cursor harness: ${passed ? 'PASS' : 'FAIL'}`;
+document.getElementById('result').textContent =
+    JSON.stringify({ total: cases.length, failed: failures.length, failures });
+</script>
+</body>
+</html>
