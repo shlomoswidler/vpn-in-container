@@ -125,12 +125,18 @@ services:
       # Scopes autoheal to these siblings only, never other stacks on this host.
       - "autoheal=true"
     restart: unless-stopped
+    # Healthy = the web UI answers and the VPN's network is still live: Gluetun's control
+    # server (port 8000) listens only in the live shared network. If the Gluetun container
+    # restarts, this container is left on its old, dead network and fails within ~30s, and
+    # Autoheal restarts it. No internet check: a VPN outage is Gluetun's to detect, and
+    # restarting this container would not fix it (it would only close the open tabs).
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- --timeout=5 http://localhost:5800 > /dev/null 2>&1 && wget -qO- --timeout=5 https://1.1.1.1 > /dev/null 2>&1"]
-      interval: 60s
-      timeout: 15s
+      test: ["CMD-SHELL", "wget -q -O /dev/null --timeout=3 http://localhost:5800 && nc -z -w 3 127.0.0.1 8000 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
       retries: 3
       start_period: 90s
+      start_interval: 5s
 
   # ===========================================
   # qBittorrent Torrent Client
@@ -165,12 +171,16 @@ services:
       # Scopes autoheal to these siblings only, never other stacks on this host.
       - "autoheal=true"
     restart: unless-stopped
+    # Healthy = the WebUI API answers and the VPN's network is still live (Gluetun's
+    # control server, port 8000); see the firefox service. No internet check: restarting
+    # qBittorrent would not fix a VPN outage, only interrupt torrents.
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf --max-time 5 http://localhost:9080/api/v2/app/version && curl -sf --max-time 5 https://1.1.1.1 > /dev/null"]
-      interval: 30s
-      timeout: 15s
+      test: ["CMD-SHELL", "curl -sf --max-time 3 http://localhost:9080/api/v2/app/version > /dev/null && nc -z -w 3 127.0.0.1 8000 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
       retries: 3
       start_period: 90s
+      start_interval: 5s
 
   # ===========================================
   # qSticky - Automatic Port Forwarding Sync
@@ -209,10 +219,11 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "bash -c '(echo > /dev/tcp/localhost/8000) 2>/dev/null && (echo > /dev/tcp/localhost/9080) 2>/dev/null || exit 1'"]
-      interval: 60s
-      timeout: 10s
+      interval: 10s
+      timeout: 5s
       retries: 3
       start_period: 120s
+      start_interval: 5s
 
   # ===========================================
   # Autoheal - Restarts unhealthy containers
