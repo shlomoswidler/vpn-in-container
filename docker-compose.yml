@@ -213,7 +213,7 @@ services:
   autoheal:
     # No version tags: the project rebuilds :latest daily. Pinned to a build by digest.
     # Pinned by tag and digest; upgrade deliberately and run tests/stack/run.sh.
-    image: willfarrell/autoheal:latest@sha256:63fb6c9afa4420bd118cb22ddee919f99dd2439105261c61f1a0fb506119f66b
+    image: willfarrell/autoheal:latest@sha256:c4227b7a25b8ef08829ad3ad440af3a821e4277c9b1b2050a3f671ad9d87bfc6
     container_name: autoheal
     restart: always
     network_mode: none
