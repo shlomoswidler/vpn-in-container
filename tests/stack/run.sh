@@ -217,6 +217,15 @@ if [[ "$forwarded" =~ ^[0-9]+$ ]] && ((forwarded > 0)) && [[ "$listen" == "$forw
 else
     fail "forwarded port '$forwarded', qBittorrent listen port '$listen'"
 fi
+# qSticky's log since it started: logged in to qBittorrent, and no errors
+# (qBittorrent 5.2+ answers login with 204, which older qSticky rejected).
+qsticky_log=$(docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' "$QSTICKY")" "$QSTICKY" 2>&1 || true)
+qsticky_errors=$(grep -E ' - (ERROR|CRITICAL) - |Login failed' <<<"$qsticky_log" | tail -n 3 || true)
+if grep -q 'Successfully logged in to qBittorrent' <<<"$qsticky_log" && [[ -z "$qsticky_errors" ]]; then
+    pass "qSticky logged in to qBittorrent with no errors since it started"
+else
+    fail "qSticky log: ${qsticky_errors:-no successful login}"
+fi
 if [[ "$forwarded" =~ ^[0-9]+$ ]] && ((forwarded > 0)); then
     check_interval=$(compose_value qsticky env:CHECK_INTERVAL)
     wrong_port=$((forwarded < 65535 ? forwarded + 1 : forwarded - 1))
