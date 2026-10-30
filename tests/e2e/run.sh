@@ -2,12 +2,13 @@
 # End-to-end test of the native cursor integration, server side.
 #
 # Starts a throwaway container from the firefox service's image with the
-# service's cursor settings (XCURSOR_* and display env vars, plus every
+# service's browser settings (XCURSOR_*, display and FF_PREF_* env vars, plus every
 # read-only mount under /usr/share/icons, /opt/noVNC and /etc/cont-init.d),
 # taken from `docker compose config` so the test follows docker-compose.yml.
 # The container has no network. Firefox opens cursor-page.html in kiosk mode;
 # for each cell the VNC probe moves the pointer there and reads the cursor the
-# VNC server sends, and decode.mjs classifies it with the noVNC decoder.
+# VNC server sends, and decode.mjs classifies it with the noVNC decoder. It also
+# checks that every FF_PREF_* entry in docker-compose.yml reached prefs.js.
 #
 # Scenario 2 removes two names from a copy of the theme to check that missing
 # names fall back as documented in config/cursors/README.md.
@@ -73,7 +74,7 @@ start_firefox() {
         "${args[@]}" \
         -e FF_KIOSK=1 \
         -e FF_OPEN_URL=file:///e2e/cursor-page.html \
-        -e FF_PREF_NO_DATA_BAR=datareporting.policy.dataSubmissionPolicyBypassNotification:true \
+        -e FF_PREF_NO_DATA_BAR=datareporting.policy.dataSubmissionPolicyBypassNotification=true \
         -v "$E2E_DIR/cursor-page.html:/e2e/cursor-page.html:ro" \
         "$IMAGE" >/dev/null
 
@@ -96,11 +97,13 @@ start_firefox() {
 in_x() { docker exec -u 1000 -e DISPLAY=:0 "$CONTAINER" "$@"; }
 
 failures=0
+checks=0
 
 # Hovers page cell INDEX and checks the cursor's classification equals
 # EXPECTED. "image:any" accepts an ordinary image of any size.
 check_cell() {
     local index=$1 expected=$2 column row x y summary actual
+    checks=$((checks + 1))
     column=$((index % COLUMNS))
     row=$((index / COLUMNS))
     x=$((column * CELL_W + CELL_W / 2))
@@ -119,8 +122,38 @@ check_cell() {
     fi
 }
 
+# Checks that every FF_PREF_* entry from docker-compose.yml reached Firefox as
+# a real preference. The image splits each value on its first "=" into a pref
+# name and value; a value without "=" silently becomes a pref named after the
+# whole string (so "autostart:true" never turned private browsing on).
+check_prefs() {
+    local i env name value pref_value line
+    for ((i = 0; i < ${#SERVICE_ARGS[@]}; i++)); do
+        env=${SERVICE_ARGS[$i]}
+        [[ "${SERVICE_ARGS[$((i - 1))]:-}" == "-e" && "$env" == FF_PREF_* ]] || continue
+        checks=$((checks + 1))
+        name=${env%%=*}
+        value=${env#*=}
+        if [[ "$value" != *=* ]]; then
+            echo "FAIL  $name=$value is not <pref name>=<value>"
+            failures=$((failures + 1))
+            continue
+        fi
+        pref_value=${value#*=}
+        line="user_pref(\"${value%%=*}\", $pref_value);"
+        if docker exec "$CONTAINER" grep -qxF "$line" /config/profile/prefs.js; then
+            echo "ok    $name -> $line"
+        else
+            echo "FAIL  $name: prefs.js has no line $line"
+            failures=$((failures + 1))
+        fi
+    done
+}
+
 echo "== scenario 1: the theme as committed"
 start_firefox "$NATIVE_CSS_SOURCE"
+check_prefs
+checks=$((checks + 1))
 geometry=$(in_x xdotool getwindowgeometry "$WINDOW" | tr -s ' ' | tr '\n' ' ')
 if [[ "$geometry" == *"Position: 0,0 "* ]]; then
     echo "ok    Firefox window starts at 0,0 (no Openbox top border)"
@@ -144,7 +177,6 @@ check_cell 2 "default"   # cursor: help
 check_cell 7 "image:any" # cursor: crosshair
 check_cell 8 "text"      # cursor: text
 
-checks=$((1 + ${#EXPECTED[@]} + 3))
 if ((failures > 0)); then
     echo "$failures of $checks check(s) failed"
     exit 1

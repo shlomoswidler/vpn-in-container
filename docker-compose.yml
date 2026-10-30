@@ -70,8 +70,9 @@ services:
       - TZ=${TZ:-America/New_York}
       # Dark mode
       - DARK_MODE=1
-      # Always use private browsing mode
-      - FF_PREF_PRIVATE_BROWSING=browser.privatebrowsing.autostart:true
+      # Always use private browsing mode. FF_PREF_* values are <pref name>=<value>:
+      # the image splits on the first "=" (tests/e2e/run.sh checks every FF_PREF_* entry).
+      - FF_PREF_PRIVATE_BROWSING=browser.privatebrowsing.autostart=true
       # Marker cursor theme (mounted below): each cursor names a CSS cursor keyword, and the
       # patched noVNC shows the viewer's own native cursor for it (see config/cursors/README.md).
       # The size must match NOMINAL_SIZE in config/cursors/generate_native_theme.py.
