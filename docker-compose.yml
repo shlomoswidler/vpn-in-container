@@ -170,7 +170,7 @@ services:
   # ===========================================
   qsticky:
     # Pinned by tag and digest; upgrade deliberately and run tests/stack/run.sh.
-    image: ghcr.io/monstermuffin/qsticky:sha-cb74306@sha256:22753ab95bd4743954ca863b13bb5d09a36f4c0609ae8443cd9a55cce969dbec
+    image: ghcr.io/monstermuffin/qsticky:2.4.3@sha256:27c19a7acc9fb8b39c2b5ebee3183190a3920afbb1c43342b01c7752c02a02d3
     container_name: qsticky
     network_mode: service:vpn
     depends_on:
