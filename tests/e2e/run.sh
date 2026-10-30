@@ -13,6 +13,11 @@
 # Scenario 2 removes two names from a copy of the theme to check that missing
 # names fall back as documented in config/cursors/README.md.
 #
+# Scenario 3 opens a normal (non-kiosk) window and drags empty tab-strip and
+# toolbar space, and Alt+drags inside the page, while the button is held. None
+# of these may start an Openbox move or resize, which would show Openbox's
+# 1-bit cursors (and Alt+Right drag would unmaximize Firefox).
+#
 # Usage: tests/e2e/run.sh   (needs docker, python3 and node on the host)
 
 set -euo pipefail
@@ -176,6 +181,88 @@ start_firefox "$WORK/reduced-theme"
 check_cell 2 "default"   # cursor: help
 check_cell 7 "image:any" # cursor: crosshair
 check_cell 8 "text"      # cursor: text
+
+# Starts a normal Firefox window (not kiosk) on about:blank, so the tab strip
+# and toolbar exist. Sets WINDOW to Firefox's X window id.
+start_firefox_windowed() {
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    docker run -d --rm --name "$CONTAINER" --network none --shm-size 1g \
+        "${SERVICE_ARGS[@]}" \
+        -e FF_OPEN_URL=about:blank \
+        -e FF_PREF_NO_DATA_BAR=datareporting.policy.dataSubmissionPolicyBypassNotification=true \
+        "$IMAGE" >/dev/null
+    echo "waiting for the Firefox window..."
+    for _ in $(seq 1 90); do
+        if in_x xdotool search --classname Navigator >/dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
+    WINDOW=$(in_x xdotool search --classname Navigator | head -n 1) || {
+        echo "FAIL: Firefox never opened a window" >&2
+        docker logs "$CONTAINER" 2>&1 | tail -30 >&2
+        exit 1
+    }
+    sleep 6  # let the toolbars finish layout
+}
+
+# The display size the firefox service asks for, as "WIDTHxHEIGHT".
+display_size() {
+    local arg width="" height=""
+    for arg in "${SERVICE_ARGS[@]}"; do
+        case "$arg" in
+            DISPLAY_WIDTH=*) width=${arg#*=} ;;
+            DISPLAY_HEIGHT=*) height=${arg#*=} ;;
+        esac
+    done
+    echo "${width}x${height}"
+}
+
+# Presses BUTTON (with MODIFIER, or "none") at (X,Y), drags to (X2,Y2), reads
+# the VNC cursor there while the button is still held, releases, and checks
+# the cursor's classification and that the window still covers the screen.
+check_drag() {
+    local label=$1 modifier=$2 button=$3 x=$4 y=$5 x2=$6 y2=$7 expected=$8
+    local step summary actual geometry
+    checks=$((checks + 1))
+    in_x xdotool mousemove "$x" "$y"
+    sleep 0.5
+    if [[ "$modifier" != none ]]; then
+        in_x xdotool keydown "$modifier"
+    fi
+    in_x xdotool mousedown "$button"
+    for step in 1 2 3 4 5; do
+        in_x xdotool mousemove $((x + (x2 - x) * step / 5)) $((y + (y2 - y) * step / 5))
+        sleep 0.05
+    done
+    summary=$(docker run --rm --network "container:$CONTAINER" \
+        -v "$E2E_DIR:/e2e:ro" -v "$WORK:/out" "$PROBE_IMAGE" \
+        python -I /e2e/rfb_cursor_probe.py 127.0.0.1 5900 "$x2" "$y2" "/out/$label")
+    in_x xdotool mouseup "$button"
+    if [[ "$modifier" != none ]]; then
+        in_x xdotool keyup "$modifier"
+    fi
+    in_x xdotool key Escape  # closes the context menu a right-button drag opens
+    sleep 0.5
+    actual=$(node "$E2E_DIR/decode.mjs" "$summary" "$WORK/$label.rgba")
+    geometry=$(in_x xdotool getwindowgeometry "$WINDOW" | tr -s ' ' | tr '\n' ' ')
+    if [[ "$actual" == "$expected" &&
+        "$geometry" == *"Position: 0,0 "*"Geometry: $(display_size) "* ]]; then
+        printf 'ok    %-16s %-8s %s\n' "$label" "$actual" "$geometry"
+    else
+        printf 'FAIL  %-16s expected %-8s got %-12s %s %s\n' \
+            "$label" "$expected" "$actual" "$geometry" "$summary"
+        failures=$((failures + 1))
+    fi
+}
+
+echo "== scenario 3: toolbar and Alt drags do not start an Openbox move/resize"
+start_firefox_windowed
+# Coordinates assume the 1920x1080 display and a fresh profile with one tab.
+check_drag tab-strip-gutter none 1 1000 20 1150 22 default
+check_drag toolbar-space none 1 1750 64 1780 66 default
+check_drag alt-left-drag alt 1 900 500 1100 600 default
+check_drag alt-right-drag alt 3 1500 800 1200 600 default
 
 if ((failures > 0)); then
     echo "$failures of $checks check(s) failed"

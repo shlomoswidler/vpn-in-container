@@ -73,6 +73,8 @@ services:
       # Always use private browsing mode. FF_PREF_* values are <pref name>=<value>:
       # the image splits on the first "=" (tests/e2e/run.sh checks every FF_PREF_* entry).
       - FF_PREF_PRIVATE_BROWSING=browser.privatebrowsing.autostart=true
+      # Load config/firefox-chrome/userChrome.css (mounted below)
+      - FF_PREF_USERCHROME=toolkit.legacyUserProfileCustomizations.stylesheets=true
       # Marker cursor theme (mounted below): each cursor names a CSS cursor keyword, and the
       # patched noVNC shows the viewer's own native cursor for it (see config/cursors/README.md).
       # The size must match NOMINAL_SIZE in config/cursors/generate_native_theme.py.
@@ -92,6 +94,10 @@ services:
       - ./config/novnc/cursor-keyword.js:/opt/noVNC/core/util/cursor-keyword.js:ro
       # Removes Openbox's 1px top border, whose unthemed cursor shows along the top edge
       - ./config/firefox-init.d/57-openbox-no-keepborder.sh:/etc/cont-init.d/57-openbox-no-keepborder.sh:ro
+      # No window dragging from toolbars: Openbox would show its 1-bit move cursor
+      - ./config/firefox-chrome/userChrome.css:/config/profile/chrome/userChrome.css:ro
+      # Removes Openbox's Alt+drag move/resize bindings (1-bit cursors; Alt+Right unmaximizes)
+      - ./config/firefox-init.d/58-openbox-no-alt-drag.sh:/etc/cont-init.d/58-openbox-no-alt-drag.sh:ro
     shm_size: "2gb"
     labels:
       # Opt-in marker for this project's autoheal instance (see autoheal service).

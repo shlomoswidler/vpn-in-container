@@ -384,8 +384,11 @@ vpn-in-container/
 │   │   ├── config.toml.example  # Template for API authentication
 │   │   └── config.toml          # Your API key (gitignored)
 │   ├── firefox/            # Browser profile (gitignored)
+│   ├── firefox-chrome/
+│   │   └── userChrome.css  # Turns off window dragging from toolbars (Openbox move cursor)
 │   ├── firefox-init.d/
-│   │   └── 57-openbox-no-keepborder.sh  # Removes the 1px top border (unthemed cursor strip)
+│   │   ├── 57-openbox-no-keepborder.sh  # Removes the 1px top border (unthemed cursor strip)
+│   │   └── 58-openbox-no-alt-drag.sh    # Removes Openbox's Alt+drag move/resize bindings
 │   ├── firefox-policies/
 │   │   └── policies.json   # Pre-installs Torrent Control extension
 │   ├── novnc/

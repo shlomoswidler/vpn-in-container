@@ -3,7 +3,7 @@
 into the image name (first line) and `docker run` arguments (one per line)
 that reproduce its browser setup: the XCURSOR_*, display and FF_PREF_*
 environment variables, and the read-only mounts under the cursor-related
-directories.
+directories and the Firefox profile's chrome/ folder (userChrome.css).
 """
 
 import json
@@ -11,7 +11,12 @@ import sys
 
 ENV_KEYS = ("XCURSOR_THEME", "XCURSOR_SIZE", "DISPLAY_WIDTH", "DISPLAY_HEIGHT", "DARK_MODE")
 FF_PREF_PREFIX = "FF_PREF_"
-MOUNT_PREFIXES = ("/usr/share/icons/", "/opt/noVNC/", "/etc/cont-init.d/")
+MOUNT_PREFIXES = (
+    "/usr/share/icons/",
+    "/opt/noVNC/",
+    "/etc/cont-init.d/",
+    "/config/profile/chrome/",
+)
 
 
 def service_args(config: dict) -> list[str]:
