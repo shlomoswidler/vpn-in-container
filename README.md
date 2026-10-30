@@ -225,14 +225,20 @@ docker compose logs autoheal
 
 The stack automatically recovers from host sleep, reboot, or VPN disconnects using two layers:
 
-**Layer 1 -- Health checks** on every service detect broken connectivity:
+**Layer 1 -- Health checks** on every service detect what they can fix:
 | Service | Checks | Interval |
 |---------|--------|----------|
-| VPN (Gluetun) | Built-in WireGuard health check | 15s |
-| qBittorrent | API responsiveness + internet via VPN | 30s |
-| Firefox | noVNC server + internet via VPN | 60s |
-| qSticky | Gluetun API + qBittorrent reachability | 60s |
-| Autoheal | Built-in | 5s |
+| VPN (Gluetun) | Built-in VPN health check (reconnects the tunnel itself) | 15s |
+| qBittorrent | WebUI API + the VPN's network is live (Gluetun's port 8000) | 10s |
+| Firefox | noVNC web UI + the VPN's network is live (Gluetun's port 8000) | 10s |
+| qSticky | Gluetun's port 8000 + qBittorrent's port 9080 | 10s |
+| Autoheal | Checks for unhealthy containers | 10s |
+
+Firefox, qBittorrent and qSticky share the VPN container's network. If the Gluetun container
+restarts, they are left on its old, dead network, where nothing listens on port 8000: they turn
+unhealthy within about 30 seconds. They deliberately do not check internet access: during a VPN
+outage, Gluetun reconnects the tunnel on its own, and restarting them would not help (it would
+close Firefox's tabs and interrupt torrents).
 
 **Layer 2 -- Autoheal** monitors Docker for unhealthy containers and restarts them.
 
@@ -242,7 +248,12 @@ belonging to other Docker Compose projects on the same host are ignored. (Do **n
 `AUTOHEAL_CONTAINER_LABEL=all` -- that makes autoheal restart every unhealthy container on
 the machine.)
 
-**Recovery flow**: VPN drops → health checks fail on dependent services → autoheal restarts them → they rejoin the recovered VPN namespace → all services return to healthy (~3-4 minutes).
+**Recovery flow**:
+- VPN outage: Gluetun reconnects the tunnel itself (seconds); nothing else restarts.
+- Gluetun container restart (for example by Autoheal): the services sharing its network fail their
+  port-8000 check → Autoheal restarts them onto the new network → all healthy. Measured with
+  `tests/stack/recovery.sh`: about 40-50 seconds (it was about 2.5 minutes with internet-based
+  checks every 30-60 seconds).
 
 Additionally, `depends_on: restart: true` ensures `docker compose restart vpn` cascades to all dependent services.
 
@@ -255,6 +266,7 @@ tests/stack/run.sh     # the running stack: VPN egress and kill switch, DNS, por
                        # qSticky, qBittorrent (API, settings, watch folder), Firefox, Autoheal
 tests/e2e/run.sh       # Firefox in throwaway containers: cursors, single window, private browsing
 tests/browser/run.sh   # the patched noVNC in headless Chrome and Firefox
+tests/stack/recovery.sh        # DISRUPTIVE: restarts the VPN container and times the recovery
 tests/qbittorrent/download.sh  # a real multi-file download between two throwaway qBittorrent
                                # containers (no internet), checked by SHA-256 and recheck
 node --test tests/ && python3 -m unittest discover -s tests   # unit tests
@@ -308,8 +320,11 @@ docker restart gluetun-vpn
 # Watch autoheal detect and restart unhealthy services
 docker compose logs -f autoheal
 
-# All services should return to healthy within ~3-4 minutes
+# All services should return to healthy within about a minute
 watch docker compose ps
+
+# Or measure it (restarts the VPN container, then times each service's recovery)
+tests/stack/recovery.sh
 ```
 
 ### Test Port Forwarding
