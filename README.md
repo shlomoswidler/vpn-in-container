@@ -248,6 +248,19 @@ Additionally, `depends_on: restart: true` ensures `docker compose restart vpn` c
 
 ## Verification
 
+### Automated Tests
+
+```bash
+tests/stack/run.sh     # the running stack: VPN egress and kill switch, DNS, port forwarding,
+                       # qSticky, qBittorrent (API, settings, watch folder), Firefox, Autoheal
+tests/e2e/run.sh       # Firefox in throwaway containers: cursors, single window, private browsing
+tests/browser/run.sh   # the patched noVNC in headless Chrome and Firefox
+node --test tests/ && python3 -m unittest discover -s tests   # unit tests
+```
+
+`tests/stack/run.sh` changes nothing permanently: it restores qBittorrent's listening port
+and removes its test torrent and test containers.
+
 ### Test VPN Connection
 
 ```bash
@@ -428,6 +441,7 @@ vpn-in-container/
 │   ├── test_generate_native_theme.py  # python3 -m unittest discover -s tests
 │   ├── test_make_core_glyph_table.py
 │   ├── e2e/run.sh          # Real Firefox + VNC server cursor test (Docker)
+│   ├── stack/run.sh        # Running stack: VPN, kill switch, ports, qBittorrent, Autoheal
 │   └── browser/run.sh      # Patched noVNC in headless Chrome and Firefox
 
 ~/Downloads/vpn-in-container/           # Host downloads directory
