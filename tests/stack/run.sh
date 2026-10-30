@@ -108,9 +108,12 @@ public_ip() {
 }
 
 qbt_preferences() { curl -s --max-time 10 "$QBT_URL/api/v2/app/preferences"; }
+# Sets qBittorrent's listening port; fails unless the API answers HTTP 200.
 set_listen_port() {
-    curl -s --max-time 10 -X POST "$QBT_URL/api/v2/app/setPreferences" \
-        --data-urlencode "json={\"listen_port\": $1}" >/dev/null
+    local code
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST \
+        "$QBT_URL/api/v2/app/setPreferences" --data-urlencode "json={\"listen_port\": $1}")
+    [[ "$code" == 200 ]]
 }
 
 VPN=$(compose_value vpn container)
@@ -230,24 +233,31 @@ if [[ "$forwarded" =~ ^[0-9]+$ ]] && ((forwarded > 0)); then
     check_interval=$(compose_value qsticky env:CHECK_INTERVAL)
     wrong_port=$((forwarded < 65535 ? forwarded + 1 : forwarded - 1))
     restore_port=$forwarded
-    set_listen_port "$wrong_port"
-    sleep 2
-    changed=$(qbt_preferences | json_get listen_port 2>/dev/null || echo "")
+    since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    # qSticky may correct the port within moments of the change (it checks every
+    # CHECK_INTERVAL seconds), so its own log line is the evidence, together with
+    # the port being back afterward.
     restored=""
-    wait_until=$((SECONDS + ${check_interval:-30} * 2 + 30))
-    while ((SECONDS < wait_until)); do
-        listen=$(qbt_preferences | json_get listen_port 2>/dev/null || echo "")
-        if [[ "$listen" == "$forwarded" ]]; then
-            restored=yes
-            break
+    if set_listen_port "$wrong_port"; then
+        wait_until=$((SECONDS + ${check_interval:-30} * 2 + 30))
+        while ((SECONDS < wait_until)); do
+            listen=$(qbt_preferences | json_get listen_port 2>/dev/null || echo "")
+            qsticky_log=$(docker logs --since "$since" "$QSTICKY" 2>&1 || true)
+            if [[ "$listen" == "$forwarded" &&
+                "$qsticky_log" == *"Port change needed: $wrong_port -> $forwarded"* ]]; then
+                restored=yes
+                break
+            fi
+            sleep 3
+        done
+        if [[ "$restored" == yes ]]; then
+            pass "qSticky restored the listening port ($wrong_port -> $forwarded)"
+            restore_port=""
+        else
+            fail "qSticky did not restore the port (set $wrong_port; now '$listen')"
         fi
-        sleep 3
-    done
-    if [[ "$changed" == "$wrong_port" && "$restored" == yes ]]; then
-        pass "qSticky restored the listening port ($wrong_port -> $forwarded)"
-        restore_port=""
     else
-        fail "qSticky did not restore the port (set $wrong_port, saw '$changed', now '$listen')"
+        fail "could not set qBittorrent's listening port through its API"
     fi
 else
     fail "qSticky check skipped: no forwarded port"
