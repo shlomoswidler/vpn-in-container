@@ -25,3 +25,13 @@
 #menu_FileQuitItem {
     display: none !important;
 }
+
+/* Permanent private browsing (browser.privatebrowsing.autostart) has no
+   private-browsing look: Firefox shows its own "Private browsing" indicator
+   (the mask icon and label at the end of the tab strip) only in temporary
+   private windows. Firefox sets privatebrowsingmode="permanent" on the root
+   element when the window really is private and the autostart pref is on
+   (PrivateBrowsingUI.sys.mjs), so show that same indicator then. */
+:root[privatebrowsingmode="permanent"] #TabsToolbar .private-browsing-indicator-with-label {
+    display: flex !important;
+}

@@ -26,6 +26,9 @@
 # strip, new-window shortcuts and window-closing shortcuts (config/firefox-autoconfig/,
 # config/firefox-profile/customKeys.json and the single-window FF_PREF_* entries).
 #
+# Scenario 6 checks that Firefox's "Private browsing" indicator shows in the tab
+# strip (userChrome.css shows it when permanent private browsing is on).
+#
 # Usage: tests/e2e/run.sh   (needs docker, python3 and node on the host)
 
 set -euo pipefail
@@ -380,6 +383,30 @@ check_single_window second-tab-torn-off drag 100 20 1500 600
 # These come last: a failure here closes Firefox and stops the container.
 check_single_window ctrl-shift-w in_x xdotool key ctrl+shift+w
 check_single_window ctrl-w-every-tab in_x xdotool key ctrl+w sleep 1 key ctrl+w sleep 1 key ctrl+w
+
+# Counts the pixels within TOLERANCE of COLOR (RRGGBB) in the screen region
+# X Y W H, read over VNC; prints rfb_color_probe.py's JSON summary.
+count_color() {
+    docker run --rm --network "container:$CONTAINER" \
+        -v "$E2E_DIR:/e2e:ro" "$PROBE_IMAGE" \
+        python -I /e2e/rfb_color_probe.py 127.0.0.1 5900 "$@"
+}
+
+# With permanent private browsing on, Firefox's own "Private browsing" indicator
+# (userChrome.css) shows at the end of the tab strip. Its mask icon has a fixed
+# #8000D7 fill; measured on v26.09.1: about 90 such pixels in the 44px strip.
+echo "== scenario 6: the private browsing indicator is shown"
+start_firefox_windowed
+checks=$((checks + 1))
+size=$(display_size)
+summary=$(count_color 0 0 "${size%x*}" 44 8000d7 16)
+matches=$(sed -n 's/.*"matches": \([0-9]*\).*/\1/p' <<<"$summary")
+if ((${matches:-0} >= 50)); then
+    printf 'ok    %-22s %s\n' private-indicator "$summary"
+else
+    printf 'FAIL  %-22s mask icon not in the tab strip: %s\n' private-indicator "$summary"
+    failures=$((failures + 1))
+fi
 
 if ((failures > 0)); then
     echo "$failures of $checks check(s) failed"
