@@ -44,8 +44,9 @@ windows it decorates, such as the Library or a Save As dialog, and the
 desktop cursor while Firefox starts) are recognized by their exact images
 instead. Openbox uses 11 fixed glyphs. `config/novnc/core-glyphs.js` holds
 each one as the VNC server sends it, with the CSS keyword it stands for
-(`fleur` is `move`, `left_ptr` is `default`, `bottom_side` is `s-resize`, and
-so on), and the patched noVNC shows the native cursor when an incoming
+(`fleur` is `move`, `left_ptr` is `default`, `bottom_side` is `ns-resize`, and
+so on; edges and corners use the two-way resize cursors, because Openbox
+resizes them both ways), and the patched noVNC shows the native cursor when an incoming
 cursor matches one exactly (same size, hotspot and pixels).
 
 `config/novnc/core-glyphs/capture.sh` generates that table from the image

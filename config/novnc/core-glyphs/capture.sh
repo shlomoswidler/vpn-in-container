@@ -32,19 +32,21 @@ trap cleanup EXIT
 # Openbox cursor -> X cursor font glyph (X11/cursorfont.h) -> CSS keyword.
 # Openbox's load_cursor() list: POINTER and BUSYPOINTER use left_ptr, BUSY
 # uses watch, MOVE uses fleur, and the eight resize directions use the side
-# and corner glyphs.
+# and corner glyphs. Openbox resizes an edge or corner both ways, so they map
+# to the two-way keywords: macOS draws the one-way ones (n-resize and so on)
+# with the opposite arrowhead grayed out.
 GLYPHS=(
     "left_ptr 68 default"
     "watch 150 wait"
     "fleur 52 move"
-    "top_side 138 n-resize"
-    "top_right_corner 136 ne-resize"
-    "right_side 96 e-resize"
-    "bottom_right_corner 14 se-resize"
-    "bottom_side 16 s-resize"
-    "bottom_left_corner 12 sw-resize"
-    "left_side 70 w-resize"
-    "top_left_corner 134 nw-resize"
+    "top_side 138 ns-resize"
+    "top_right_corner 136 nesw-resize"
+    "right_side 96 ew-resize"
+    "bottom_right_corner 14 nwse-resize"
+    "bottom_side 16 ns-resize"
+    "bottom_left_corner 12 nesw-resize"
+    "left_side 70 ew-resize"
+    "top_left_corner 134 nwse-resize"
 )
 
 IMAGE=$(docker compose -f "$REPO/docker-compose.yml" config --format json \
