@@ -140,6 +140,8 @@ docker compose stop
 ### How Firefox Behaves in the Container
 
 - **Private browsing, always:** history, cookies and site data are not kept.
+  The mask icon and "Private browsing" label at the right end of the tab strip
+  show it is on (Firefox only shows it when it really is).
 - **Your own mouse cursors:** the web UI shows your computer's native cursors
   (see [config/cursors/README.md](config/cursors/README.md)).
 - **One window:** Firefox stays a single maximized window, since the container
