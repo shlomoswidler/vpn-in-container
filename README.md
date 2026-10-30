@@ -255,6 +255,8 @@ tests/stack/run.sh     # the running stack: VPN egress and kill switch, DNS, por
                        # qSticky, qBittorrent (API, settings, watch folder), Firefox, Autoheal
 tests/e2e/run.sh       # Firefox in throwaway containers: cursors, single window, private browsing
 tests/browser/run.sh   # the patched noVNC in headless Chrome and Firefox
+tests/qbittorrent/download.sh  # a real multi-file download between two throwaway qBittorrent
+                               # containers (no internet), checked by SHA-256 and recheck
 node --test tests/ && python3 -m unittest discover -s tests   # unit tests
 ```
 
@@ -442,6 +444,7 @@ vpn-in-container/
 │   ├── test_make_core_glyph_table.py
 │   ├── e2e/run.sh          # Real Firefox + VNC server cursor test (Docker)
 │   ├── stack/run.sh        # Running stack: VPN, kill switch, ports, qBittorrent, Autoheal
+│   ├── qbittorrent/download.sh  # Isolated real download test for the qBittorrent image
 │   └── browser/run.sh      # Patched noVNC in headless Chrome and Firefox
 
 ~/Downloads/vpn-in-container/           # Host downloads directory
