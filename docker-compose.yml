@@ -3,7 +3,9 @@ services:
   # VPN Container - All traffic routes through this
   # ===========================================
   vpn:
-    image: qmcgaw/gluetun:latest
+    # v3.41.0 plus one Mullvad-only commit (development build 9b9b723; no release tag matches).
+    # Pinned by tag and digest; upgrade deliberately and run tests/stack/run.sh.
+    image: qmcgaw/gluetun:latest@sha256:7b1dafa3d25cfd891deae52c7973c499f619f7d8eac52fad84f9aa1e5e6e01ca
     container_name: gluetun-vpn
     cap_add:
       - NET_ADMIN
@@ -50,7 +52,7 @@ services:
   firefox:
     # Pinned: config/novnc/cursor.js and config/cursors/ are built against this version.
     # Re-check both before upgrading (see config/cursors/README.md).
-    image: jlesage/firefox:v26.09.1
+    image: jlesage/firefox:v26.09.1@sha256:302aa068dcfa46a2d248771c998f67377383554df8940252caef42b99c13eb65
     container_name: firefox-novnc
     network_mode: service:vpn
     depends_on:
@@ -129,7 +131,8 @@ services:
   # qBittorrent Torrent Client
   # ===========================================
   qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:latest
+    # Pinned by tag and digest; upgrade deliberately and run tests/stack/run.sh.
+    image: lscr.io/linuxserver/qbittorrent:5.1.4-r1-ls436@sha256:95114034a7f74672b76f795f6938921b0ca795f85b59b48691035dc66714f34c
     container_name: qbittorrent
     network_mode: service:vpn
     depends_on:
@@ -166,7 +169,8 @@ services:
   # qSticky - Automatic Port Forwarding Sync
   # ===========================================
   qsticky:
-    image: ghcr.io/monstermuffin/qsticky:latest
+    # Pinned by tag and digest; upgrade deliberately and run tests/stack/run.sh.
+    image: ghcr.io/monstermuffin/qsticky:sha-cb74306@sha256:22753ab95bd4743954ca863b13bb5d09a36f4c0609ae8443cd9a55cce969dbec
     container_name: qsticky
     network_mode: service:vpn
     depends_on:
@@ -207,7 +211,9 @@ services:
   # Autoheal - Restarts unhealthy containers
   # ===========================================
   autoheal:
-    image: willfarrell/autoheal:latest
+    # No version tags: the project rebuilds :latest daily. Pinned to a build by digest.
+    # Pinned by tag and digest; upgrade deliberately and run tests/stack/run.sh.
+    image: willfarrell/autoheal:latest@sha256:63fb6c9afa4420bd118cb22ddee919f99dd2439105261c61f1a0fb506119f66b
     container_name: autoheal
     restart: always
     network_mode: none
