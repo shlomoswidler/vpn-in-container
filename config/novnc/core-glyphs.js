@@ -73,7 +73,7 @@ export const CORE_GLYPHS = [
         ],
     },
     {
-        glyph: 'top_side', index: 138, keyword: 'n-resize',
+        glyph: 'top_side', index: 138, keyword: 'ns-resize',
         w: 15, h: 16, hotx: 7, hoty: 1,
         rows: [
             'WWWWWWWWWWWWWWW',
@@ -95,7 +95,7 @@ export const CORE_GLYPHS = [
         ],
     },
     {
-        glyph: 'top_right_corner', index: 136, keyword: 'ne-resize',
+        glyph: 'top_right_corner', index: 136, keyword: 'nesw-resize',
         w: 16, h: 16, hotx: 14, hoty: 1,
         rows: [
             'WWWWWWWWWWWWWWWW',
@@ -117,7 +117,7 @@ export const CORE_GLYPHS = [
         ],
     },
     {
-        glyph: 'right_side', index: 96, keyword: 'e-resize',
+        glyph: 'right_side', index: 96, keyword: 'ew-resize',
         w: 16, h: 15, hotx: 14, hoty: 7,
         rows: [
             '............WWWW',
@@ -138,7 +138,7 @@ export const CORE_GLYPHS = [
         ],
     },
     {
-        glyph: 'bottom_right_corner', index: 14, keyword: 'se-resize',
+        glyph: 'bottom_right_corner', index: 14, keyword: 'nwse-resize',
         w: 16, h: 16, hotx: 14, hoty: 14,
         rows: [
             '............WWWW',
@@ -160,7 +160,7 @@ export const CORE_GLYPHS = [
         ],
     },
     {
-        glyph: 'bottom_side', index: 16, keyword: 's-resize',
+        glyph: 'bottom_side', index: 16, keyword: 'ns-resize',
         w: 15, h: 16, hotx: 7, hoty: 14,
         rows: [
             '......WWW......',
@@ -182,7 +182,7 @@ export const CORE_GLYPHS = [
         ],
     },
     {
-        glyph: 'bottom_left_corner', index: 12, keyword: 'sw-resize',
+        glyph: 'bottom_left_corner', index: 12, keyword: 'nesw-resize',
         w: 16, h: 16, hotx: 1, hoty: 14,
         rows: [
             'WWWW............',
@@ -204,7 +204,7 @@ export const CORE_GLYPHS = [
         ],
     },
     {
-        glyph: 'left_side', index: 70, keyword: 'w-resize',
+        glyph: 'left_side', index: 70, keyword: 'ew-resize',
         w: 16, h: 15, hotx: 1, hoty: 7,
         rows: [
             'WWWW............',
@@ -225,7 +225,7 @@ export const CORE_GLYPHS = [
         ],
     },
     {
-        glyph: 'top_left_corner', index: 134, keyword: 'nw-resize',
+        glyph: 'top_left_corner', index: 134, keyword: 'nwse-resize',
         w: 16, h: 16, hotx: 1, hoty: 1,
         rows: [
             'WWWWWWWWWWWWWWWW',

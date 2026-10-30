@@ -135,6 +135,26 @@ test('core glyph table covers Openbox\'s eleven cursors with valid keywords', ()
     }
 });
 
+test('Openbox resize glyphs map to two-way resize cursors', () => {
+    // Openbox resizes an edge or corner both ways. macOS draws the one-way
+    // keywords (n-resize and so on) with the opposite arrowhead grayed out.
+    const oneWay = new Set(['n-resize', 'e-resize', 's-resize', 'w-resize',
+                            'ne-resize', 'nw-resize', 'se-resize', 'sw-resize']);
+    const expected = new Map([
+        ['top_side', 'ns-resize'], ['bottom_side', 'ns-resize'],
+        ['left_side', 'ew-resize'], ['right_side', 'ew-resize'],
+        ['top_left_corner', 'nwse-resize'], ['bottom_right_corner', 'nwse-resize'],
+        ['top_right_corner', 'nesw-resize'], ['bottom_left_corner', 'nesw-resize'],
+    ]);
+    for (const glyph of CORE_GLYPHS) {
+        assert.ok(!oneWay.has(glyph.keyword), `${glyph.glyph} maps to one-way ${glyph.keyword}`);
+        if (expected.has(glyph.glyph)) {
+            assert.equal(glyph.keyword, expected.get(glyph.glyph), glyph.glyph);
+        }
+    }
+    assert.equal(CORE_GLYPHS.filter(g => expected.has(g.glyph)).length, expected.size);
+});
+
 test('every Openbox core glyph maps to its keyword', () => {
     for (const glyph of CORE_GLYPHS) {
         const { w, h, hotx, hoty, keyword } = glyph;

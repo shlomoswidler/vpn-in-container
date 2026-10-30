@@ -318,8 +318,8 @@ center_x=$((lib_x + lib_w / 2))
 # 2-15 px above the client area, the top resize edge is the frame's top row,
 # and the bottom resize edge covers 0-2 px below the client area.
 check_point library-title-bar "$center_x" $((lib_y - 10)) glyph:default
-check_point library-top-edge "$center_x" $((lib_y - 18)) glyph:n-resize
-check_point library-bottom-edge "$center_x" $((lib_y + lib_h + 1)) glyph:s-resize
+check_point library-top-edge "$center_x" $((lib_y - 18)) glyph:ns-resize
+check_point library-bottom-edge "$center_x" $((lib_y + lib_h + 1)) glyph:ns-resize
 check_drag library-title-drag none 1 "$center_x" $((lib_y - 10)) \
     $((center_x + 100)) $((lib_y + 90)) glyph:move
 
