@@ -24,6 +24,16 @@ def problems(prefs: dict) -> list[str]:
         found.append("upnp=true")
     if not prefs.get("bypass_auth_subnet_whitelist_enabled"):
         found.append("bypass_auth_subnet_whitelist_enabled=false")
+    whitelist = {net.strip() for net in prefs.get("bypass_auth_subnet_whitelist", "").split("\n")}
+    missing = {"192.168.0.0/16", "172.16.0.0/12", "10.0.0.0/8"} - whitelist
+    if missing:
+        found.append(f"bypass_auth_subnet_whitelist lacks {sorted(missing)}")
+    if not prefs.get("bypass_local_auth"):
+        found.append("bypass_local_auth=false")
+    if prefs.get("web_ui_address") != "*":
+        found.append(f"web_ui_address={prefs.get('web_ui_address')}")
+    if prefs.get("web_ui_domain_list") != "*":
+        found.append(f"web_ui_domain_list={prefs.get('web_ui_domain_list')}")
     return found
 
 
