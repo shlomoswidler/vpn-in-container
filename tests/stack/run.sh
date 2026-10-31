@@ -800,8 +800,12 @@ if [[ "$forwarded" =~ ^[0-9]+$ ]] && ((forwarded > 0)) &&
 else
     fail "$port_file holds '$port_file_content', owner '$port_file_owner' (want '$forwarded', 0:0)"
 fi
+# A file it may not open fails with "permission denied" (EACCES), a chown or
+# chmod it may not make with "operation not permitted" (EPERM) after the
+# call's name. Not every EPERM: while the tunnel is down, the kill switch
+# refuses Gluetun's own packets out the other interface with it too.
 vpn_log=$(docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' "$VPN")" "$VPN" 2>&1 || true)
-file_errors=$(grep -iE 'chown|chmod|permission denied|not permitted' <<<"$vpn_log" || true)
+file_errors=$(grep -iE 'chown|chmod|permission denied' <<<"$vpn_log" || true)
 if [[ -n "$vpn_log" && -z "$file_errors" ]]; then
     pass "Gluetun logged no chown, chmod or permission error since it started"
 else
