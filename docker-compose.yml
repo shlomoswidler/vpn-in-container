@@ -142,6 +142,13 @@ services:
       - TZ=${TZ:-America/New_York}
       # Dark mode
       - DARK_MODE=1
+      # Sound in the web UI (the image's default is 0: pages play without sound). The image
+      # runs PulseAudio for Firefox and streams its output over the web UI's port 5800
+      # (/websockify-audio, raw 44.1 kHz stereo, about 1.4 Mbit/s): turn it on once with the
+      # speaker icon in the side panel. Not for VNC clients. It needs nothing beyond the
+      # hardening below (measured: PulseAudio and the recorder run as the app user with no
+      # capabilities and write only under /tmp and /config).
+      - WEB_AUDIO=1
       # Always use private browsing mode. FF_PREF_* values are <pref name>=<value>:
       # the image splits on the first "=" (tests/e2e/run.sh checks every FF_PREF_* entry).
       - FF_PREF_PRIVATE_BROWSING=browser.privatebrowsing.autostart=true
