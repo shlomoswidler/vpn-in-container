@@ -15,6 +15,8 @@
 #     resolver, not the host's
 #   - Gluetun's forwarded port is qBittorrent's listening port, and qSticky
 #     restores it after it is changed
+#   - Gluetun's control server refuses requests without the right API key, and
+#     with qSticky's valid key refuses (read-only) routes outside its role
 #   - qBittorrent's WebUI, API and settings, and the .torrent watch-folder
 #     hand-off (a private, tracker-less test torrent: no network contact)
 #   - the Firefox web UI, private browsing and the single window
@@ -583,6 +585,30 @@ for route in /v1/portforward /v1/vpn/status; do
             fail "Gluetun control server answered $route with $key API key: HTTP $code"
         fi
     done
+done
+# qSticky's role allows only GET /v1/portforward and GET /v1/vpn/status: with
+# its valid key, other routes must be refused. Read-only routes only (never a
+# PUT, or the v0 GET restart routes). Gluetun answers 404 for a route it does
+# not have, before any role check, so the 401s are refusals of real routes.
+# Prints the HTTP status of a GET with qSticky's key: control_get ROUTE
+control_get() {
+    docker exec -e GLUETUN_API_KEY "$QBT" sh -c \
+        'curl -s -o /dev/null -w "%{http_code}" --max-time 10 -H "X-API-Key: $GLUETUN_API_KEY" "http://localhost:8000$1"' \
+        sh "$1" 2>/dev/null || true
+}
+code=$(control_get "/v1/$TEST_ID")
+if [[ "$code" == 404 ]]; then
+    pass "Gluetun control server answers a route it does not have with 404 (valid API key)"
+else
+    fail "Gluetun control server answered the unknown route /v1/$TEST_ID with HTTP $code (want 404)"
+fi
+for route in /v1/publicip/ip /v1/dns/status /v1/vpn/settings /v1/updater/status /v1/version; do
+    code=$(control_get "$route")
+    if [[ "$code" == 401 ]]; then
+        pass "Gluetun control server refuses $route, outside qSticky's role, with its valid API key (401)"
+    else
+        fail "Gluetun control server answered $route (outside qSticky's role) with its valid API key: HTTP $code"
+    fi
 done
 forwarded=$(docker exec -e GLUETUN_API_KEY "$QBT" sh -c \
     'curl -s --max-time 10 -H "X-API-Key: $GLUETUN_API_KEY" http://localhost:8000/v1/portforward' \
