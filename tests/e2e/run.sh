@@ -42,6 +42,15 @@
 # reflexive address still comes through. Dummy interfaces and a STUN server in
 # the container's network namespace stand in for the network.
 #
+# Scenario 9 checks that a page's sound reaches the web UI's audio stream
+# (WEB_AUDIO=1): audio-page.html plays a 1000 Hz tone on the left channel and
+# 1500 Hz on the right after a click. It checks each hop: PulseAudio, the
+# recorder and nginx's /websockify-audio are set up, the web UI is told audio
+# is supported, Firefox holds a PulseAudio connection, the recorder's socket
+# carries the tone, and the WebSocket the web UI reads carries it at the right
+# rate in whole samples (ws_audio_probe.py), with silence before the click and
+# after the tone stops.
+#
 # Usage: tests/e2e/run.sh   (needs docker, python3 and node on the host)
 
 set -euo pipefail
@@ -746,6 +755,150 @@ if [[ "$result" == "webrtc-result host= srflx=$STUN_MAPPED "* &&
 else
     printf 'FAIL  %-22s %s\n' webrtc-candidates "${result:-(no result)}"
     failures=$((failures + 1))
+fi
+
+# With WEB_AUDIO=1 the image runs PulseAudio (a null sink, socket
+# /tmp/pulseaudio.sock) for Firefox, records the sink's monitor (audiorecorder,
+# socket /tmp/vnc-audio.sock: s16le, 2 channels, 44.1 kHz), and nginx relays
+# that on /websockify-audio, port 5800, to the web UI's PCMPlayer. Each check
+# below covers one hop, so a failure says where the sound stops. The probes run
+# in the container's network namespace; the sockets are files in its /tmp, so
+# the checks of those use docker exec.
+echo "== scenario 9: a page's sound reaches the web UI's audio stream"
+TONE=tone:1000,1500 # audio-page.html's left and right frequencies
+audio_failures=$failures
+
+# check_audio LABEL COMMAND...: ok if COMMAND succeeds; prints its output.
+check_audio() {
+    local label=$1 output
+    shift
+    checks=$((checks + 1))
+    if output=$("$@" 2>&1); then
+        printf 'ok    %-22s %s\n' "$label" "$output"
+    else
+        printf 'FAIL  %-22s %s\n' "$label" "${output:-(no output)}"
+        failures=$((failures + 1))
+    fi
+}
+
+# Reads the web UI's audio WebSocket for SECONDS and checks it against EXPECT
+# (silence or $TONE); prints ws_audio_probe.py's summary.
+ws_audio() {
+    docker run --rm --network "container:$CONTAINER" -v "$E2E_DIR:/e2e:ro" "$PROBE_IMAGE" \
+        python -I /e2e/ws_audio_probe.py ws 127.0.0.1 5800 "$1" "$2"
+}
+
+# The audio services run and have their sockets, and nginx relays the stream.
+audio_services() {
+    docker exec "$CONTAINER" sh -c '
+        pulseaudio=$(pgrep -x pulseaudio) && recorder=$(pgrep -x audiorecorder) &&
+            echo "pulseaudio $pulseaudio, audiorecorder $recorder"'
+}
+audio_sockets() {
+    docker exec "$CONTAINER" sh -c '
+        test -S /tmp/pulseaudio.sock && test -S /tmp/vnc-audio.sock &&
+            echo "/tmp/pulseaudio.sock and /tmp/vnc-audio.sock are sockets"'
+}
+audio_nginx() {
+    docker exec "$CONTAINER" \
+        grep -oF 'websockify_pass unix:/tmp/vnc-audio.sock;' /var/tmp/nginx/audio.conf
+}
+# The web UI shows its audio controls and opens the stream only when told to.
+audio_webdata() {
+    docker exec "$CONTAINER" wget -q -O - http://127.0.0.1:5800/webdata.json |
+        grep -oF '"audioSupport": true'
+}
+# Firefox (its main process, which plays a page's sound) is told the server.
+# /proc/PID/environ and /proc/PID/fd are readable only with Firefox's user and
+# group.
+firefox_pulse_server() {
+    docker exec -u 1000:1000 "$CONTAINER" cat "/proc/$FIREFOX_PID/environ" | tr '\0' '\n' |
+        grep -x 'PULSE_SERVER=unix:/tmp/pulseaudio.sock'
+}
+
+# Prints how many of Firefox's sockets are the client end of a connection to
+# PulseAudio: unix_peers_probe.py lists those ends, and /proc/PID/fd links to
+# each socket a process holds. Fails if nothing listens on PulseAudio's socket.
+firefox_pulse_connections() {
+    local clients held
+    clients=$(docker run --rm --network "container:$CONTAINER" -v "$E2E_DIR:/e2e:ro" \
+        "$PROBE_IMAGE" python -I /e2e/unix_peers_probe.py /tmp/pulseaudio.sock) || return 1
+    held=$(docker exec -u 1000:1000 "$CONTAINER" ls -l "/proc/$FIREFOX_PID/fd" |
+        sed -n 's/.*socket:\[\([0-9]*\)\].*/\1/p') || return 1
+    python3 -I -c '
+import json, sys
+clients = json.loads(sys.argv[1])
+if not clients["listening"]:
+    sys.exit("nothing listens on PulseAudio'"'"'s socket: " + sys.argv[1])
+held = set(sys.argv[2].split())
+print(sum(1 for inode in clients["clients"] if str(inode) in held))
+' "$clients" "$held"
+}
+
+# check_firefox_pulse LABEL MIN MAX: Firefox holds MIN to MAX PulseAudio connections.
+check_firefox_pulse() {
+    local label=$1 min=$2 max=$3 count
+    checks=$((checks + 1))
+    if ! count=$(firefox_pulse_connections 2>&1); then
+        printf 'FAIL  %-22s %s\n' "$label" "$count"
+        failures=$((failures + 1))
+    elif ((min <= count && count <= max)); then
+        printf 'ok    %-22s Firefox holds %s PulseAudio connection(s)\n' "$label" "$count"
+    else
+        printf 'FAIL  %-22s Firefox holds %s PulseAudio connection(s), expected %s to %s\n' \
+            "$label" "$count" "$min" "$max"
+        failures=$((failures + 1))
+    fi
+}
+
+# check_title LABEL PREFIX EXPECTED: the page's title starts with PREFIX within
+# 15 s, and is EXPECTED.
+check_title() {
+    local label=$1 prefix=$2 expected=$3 title
+    checks=$((checks + 1))
+    if title=$(wait_title "$prefix") && [[ "$title" == "$expected" ]]; then
+        printf 'ok    %-22s %s\n' "$label" "$title"
+    else
+        printf 'FAIL  %-22s the page shows "%s", expected "%s"\n' \
+            "$label" "$(shown_title)" "$expected"
+        failures=$((failures + 1))
+    fi
+}
+
+checks=$((checks + 1))
+if [[ " ${SERVICE_ARGS[*]} " == *" WEB_AUDIO=1 "* ]]; then
+    echo "ok    the firefox service sets WEB_AUDIO=1"
+else
+    echo "FAIL  the firefox service does not set WEB_AUDIO=1"
+    failures=$((failures + 1))
+fi
+start_firefox_windowed audio-page.html "e2e audio page"
+FIREFOX_PID=$(in_x xdotool getwindowpid "$WINDOW")
+check_audio audio-services audio_services
+check_audio audio-sockets audio_sockets
+check_audio audio-nginx audio_nginx
+check_audio audio-webdata audio_webdata
+check_audio firefox-pulse-server firefox_pulse_server
+# Negative controls for the checks after the click: nothing plays yet, and
+# Firefox has no PulseAudio connection (it connects when a page plays sound).
+check_audio audio-silence-before ws_audio 3 silence
+check_firefox_pulse firefox-pulse-before 0 0
+in_x xdotool windowactivate --sync "$WINDOW" \
+    mousemove "$((DISPLAY_W / 2))" "$((DISPLAY_H / 2))" click 1
+check_title audio-page-playing audio-playing "audio-playing state=running rate=44100"
+check_firefox_pulse firefox-pulse-playing 1 99
+# The hop before nginx: the recorder's socket. nc reads it until timeout stops
+# nc (so its status is timeout's); the analysis uses the capture's last second.
+docker exec "$CONTAINER" timeout 3 nc -d -U /tmp/vnc-audio.sock >"$WORK/raw-tone.pcm" || true
+check_audio audio-recorder-tone \
+    python3 -I "$E2E_DIR/ws_audio_probe.py" raw "$WORK/raw-tone.pcm" "$TONE"
+check_audio audio-websocket-tone ws_audio 3 "$TONE"
+in_x xdotool mousemove "$((DISPLAY_W / 2))" "$((DISPLAY_H / 2))" click 1
+check_title audio-page-stopped audio-stopped audio-stopped
+check_audio audio-silence-after ws_audio 3 silence
+if ((failures > audio_failures)); then
+    echo "the audio services' log:"
+    docker logs "$CONTAINER" 2>&1 | grep -E '^\[(pulseaudio|audiorecorder|nginx) *\]' || true
 fi
 
 if ((failures > 0)); then
