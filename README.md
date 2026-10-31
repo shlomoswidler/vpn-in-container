@@ -451,6 +451,17 @@ Common issues:
 - Invalid `WIREGUARD_PRIVATE_KEY` - regenerate from ProtonVPN
 - Server unavailable - try different `SERVER_COUNTRIES` in `.env`
 
+### Gluetun Warns "failed writing servers to file" (Linux)
+
+Gluetun runs as root but without the `DAC_OVERRIDE` capability, so it can write only into folders
+and files that root owns. On a Linux host, `./config/gluetun` belongs to your user, and Gluetun
+logs `WARN [storage] failed writing servers to file: open /gluetun/servers.json: permission
+denied`. Only the saved copy of its server list is affected: it keeps using its built-in list, and
+the VPN works. `tests/stack/run.sh` reports the line as a permission error. To let Gluetun save
+the list, give the folder to root: `sudo chown -R 0:0 config/gluetun`. (On macOS with OrbStack or
+Docker Desktop, the bind mount's files show as root's inside the container, so this does not
+happen.)
+
 ### qBittorrent Shows "Stalled"
 
 - Verify port forwarding is working: `docker compose logs qsticky`
@@ -598,10 +609,11 @@ vpn-in-container/
     privileges. The images' init starts as root and drops to its user with syscalls,
     which this does not affect.
   - Capabilities: each service drops all of them and adds back only what its image needs: Gluetun
-    `NET_ADMIN`, `NET_RAW`, `CHOWN`, `DAC_OVERRIDE`; Firefox `CHOWN`, `DAC_OVERRIDE`, `FOWNER`,
-    `SETUID`, `SETGID`, `KILL`, `NET_BIND_SERVICE`; qBittorrent `CHOWN`, `DAC_OVERRIDE`,
-    `SETUID`, `SETGID`, `KILL`; qSticky, Autoheal and the socket proxy none. The comments in
-    `docker-compose.yml` say what breaks without each.
+    `NET_ADMIN`, `NET_RAW`; Firefox `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`, `KILL`,
+    `NET_BIND_SERVICE`; qBittorrent `CHOWN`, `DAC_OVERRIDE`, `SETUID`, `SETGID`, `KILL`; qSticky,
+    Autoheal and the socket proxy none. The comments in `docker-compose.yml` say what breaks
+    without each. Gluetun writes its status files (the forwarded port) as root's (`PUID=0`) in a
+    tmpfs it can search, so it needs neither `CHOWN` nor `DAC_OVERRIDE`.
   - Process and memory limits (`pids_limit`, `mem_limit`), so a runaway process stops in its own
     container instead of slowing the computer. Each is well above the peak measured: Firefox
     8 GB and 4096 processes and threads (20 busy tabs used 4.3 GB and 1,311), qBittorrent 2 GB,
@@ -610,8 +622,8 @@ vpn-in-container/
     keep many more tabs open.
   - Read-only root filesystems for Firefox, qSticky, Autoheal and the socket proxy, with tmpfs
     mounts where they write (`/tmp` and `/run`; qSticky's `/app/health`). Autoheal also runs as
-    `nobody` (user 65534). Not for Gluetun, which writes `/etc/passwd` and `/etc/resolv.conf` at
-    start, or qBittorrent, whose image ignores `PUID`/`PGID` when read-only.
+    `nobody` (user 65534). Not for Gluetun, which writes `/etc/resolv.conf` at start, or
+    qBittorrent, whose image ignores `PUID`/`PGID` when read-only.
 - Only `autoheal-proxy` mounts the Docker socket. The `:ro` on that mount does not limit the
   API (a read-only mount does not stop connecting to a socket, and every API call, writes
   included, goes over that connection); the proxy's allowlist does. Autoheal
