@@ -26,7 +26,13 @@ PROXY_TEMPLATE = REPO_ROOT / "config" / "autoheal-proxy" / "haproxy.cfg"
 
 # name:tag@sha256:<digest>. The name may include a registry host and port; the tag is the
 # part after the last colon of the reference, so it contains no slash.
-PINNED_IMAGE = re.compile(r"^[^@\s]+:[\w][\w.-]{0,127}@sha256:[0-9a-f]{64}$")
+PINNED_IMAGE = re.compile(r"^([^@\s]+):([\w][\w.-]{0,127})@sha256:([0-9a-f]{64})$")
+# A service built here instead: a GitHub repository at a full commit SHA (BuildKit fetches
+# exactly that commit), and a Dockerfile in the compose file whose every FROM is pinned.
+GIT_CONTEXT = re.compile(r"^https://github\.com/[\w.-]+/([\w.-]+)\.git#([0-9a-f]{40})$")
+# Only these build options: any other (args, target, a Dockerfile from the context, extra
+# contexts, ...) could change what is built without changing the inputs checked here.
+BUILD_KEYS = {"context", "dockerfile_inline", "labels"}
 DOCKER_SOCKET = "/var/run/docker.sock"
 LOOPBACK = "127.0.0.1"
 AUTOHEAL = "autoheal"
@@ -43,9 +49,10 @@ PROXY_RULES = [
 ]
 VPN = "vpn"
 BEHIND_VPN = ("firefox", "qbittorrent", "qsticky")
-# The services the hardening options apply to. Autoheal is left out: its image is to be
-# replaced by a hardened local build.
-HARDENED = (VPN, *BEHIND_VPN, AUTOHEAL_PROXY)
+# The services the hardening options apply to: every one.
+HARDENED = (VPN, *BEHIND_VPN, AUTOHEAL, AUTOHEAL_PROXY)
+# Autoheal runs as nobody (it needs no file and no privilege).
+NOBODY = "65534:65534"
 NO_NEW_PRIVILEGES = "no-new-privileges:true"
 # The services with a read-only root filesystem, and the tmpfs mounts each needs. Gluetun
 # writes /etc at start (its user, resolv.conf); in read-only mode the qBittorrent image
@@ -53,6 +60,7 @@ NO_NEW_PRIVILEGES = "no-new-privileges:true"
 READ_ONLY_TMPFS = {
     "firefox": {"/tmp", "/run"},
     "qsticky": {"/app/health"},
+    AUTOHEAL: set(),
     AUTOHEAL_PROXY: {"/run"},
 }
 # Firefox preferences the firefox service must set through FF_PREF_* entries
@@ -73,8 +81,12 @@ CAPABILITIES = {
     "firefox": {"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "KILL", "NET_BIND_SERVICE"},
     "qbittorrent": {"CHOWN", "DAC_OVERRIDE", "SETUID", "SETGID", "KILL"},
     "qsticky": set(),
+    AUTOHEAL: set(),
     AUTOHEAL_PROXY: set(),
 }
+# How much longer than the longest stop timeout Autoheal's curl must wait for a restart's
+# answer: the restart also starts the container again.
+RESTART_MARGIN = 30
 
 
 def compose_config(env_file: Path = ENV_FILE, **variables: str | None) -> dict:
@@ -107,6 +119,77 @@ def compose_config(env_file: Path = ENV_FILE, **variables: str | None) -> dict:
             f"docker CLI with the Compose plugin:\n{result.stderr}"
         )
     return json.loads(result.stdout)
+
+
+def dockerfile_from_lines(dockerfile: str) -> list[str]:
+    """The image reference of each FROM instruction (without `AS <stage>`)."""
+    return [
+        line.split()[1] if len(line.split()) > 1 else ""
+        for line in dockerfile.splitlines()
+        if line.split()[:1] and line.split()[0].upper() == "FROM"
+    ]
+
+
+def build_pin_problems(service: dict) -> list[str]:
+    """Why SERVICE (resolved, with a build section) is not pinned; [] if it is.
+
+    Pinned means: built from a GitHub repository at a full commit SHA, with a
+    dockerfile_inline whose every FROM is name:tag@sha256:<digest> (and no `# syntax`
+    line, which would fetch a BuildKit frontend); never pulled; an image tag that names
+    the commit and the base, so that changing either builds a new image instead of reusing
+    the old one; and labels that record both (tests/stack/run.sh compares them with the
+    running image's).
+    """
+    build = service.get("build", {})
+    problems = []
+    if set(build) - BUILD_KEYS:
+        problems.append(f"build options beyond {sorted(BUILD_KEYS)}: {sorted(set(build))}")
+    context = GIT_CONTEXT.match(build.get("context", ""))
+    if not context:
+        problems.append(f"context is not a GitHub repository at a full commit SHA: {build}")
+    dockerfile = build.get("dockerfile_inline", "")
+    froms = dockerfile_from_lines(dockerfile)
+    if not froms:
+        problems.append("no dockerfile_inline with a FROM line")
+    bases = [PINNED_IMAGE.match(ref) for ref in froms]
+    problems += [
+        f"FROM {ref} is not name:tag@sha256:<digest>" for ref, m in zip(froms, bases) if not m
+    ]
+    if re.search(r"^\s*#\s*syntax\s*=", dockerfile, re.MULTILINE | re.IGNORECASE):
+        problems.append("a `# syntax` line fetches a BuildKit frontend")
+    if service.get("pull_policy") != "never":
+        problems.append(f"pull_policy is {service.get('pull_policy')!r}, not 'never'")
+    if problems:
+        return problems
+    commit = context.group(2)
+    name, tag, digest = bases[-1].groups()
+    base = f"{name.rsplit('/', 1)[-1]}{tag}"
+    image_tag = service.get("image", "").rpartition(":")[2]
+    want_tag = f"{commit[:7]}-{base}-{digest[:12]}"
+    if image_tag != want_tag:
+        problems.append(f"image tag {image_tag!r} does not name the build inputs ({want_tag!r})")
+    labels = build.get("labels", {})
+    want_labels = {
+        "org.opencontainers.image.revision": commit,
+        "org.opencontainers.image.base.name": f"{name}:{tag}",
+        "org.opencontainers.image.base.digest": f"sha256:{digest}",
+    }
+    for key, value in want_labels.items():
+        if labels.get(key) != value:
+            problems.append(f"label {key} is {labels.get(key)!r}, not {value!r}")
+    return problems
+
+
+def proxy_server_timeout_seconds() -> int:
+    """HAProxy's `timeout server` in config/autoheal-proxy/haproxy.cfg, in seconds."""
+    # HAProxy's time units; a bare number is in milliseconds.
+    units = {"us": 1e-6, "ms": 1e-3, "": 1e-3, "s": 1, "m": 60, "h": 3600, "d": 86400}
+    line = re.compile(r"^\s*timeout server\s+(\d+)(us|ms|s|m|h|d|)\s*$", re.MULTILINE)
+    found = line.findall(PROXY_TEMPLATE.read_text())
+    if len(found) != 1:
+        raise AssertionError(f"want one `timeout server` line in {PROXY_TEMPLATE}: {found}")
+    value, unit = found[0]
+    return int(int(value) * units[unit])
 
 
 def generator_nominal_size() -> int:
@@ -229,9 +312,45 @@ class ComposeTests(unittest.TestCase):
         self.assertEqual(set(self.services), {VPN, AUTOHEAL, AUTOHEAL_PROXY, *BEHIND_VPN})
 
     def test_every_image_is_pinned_by_tag_and_digest(self):
+        # Or, for a service built here, by the commit and base digest it is built from.
         for name, service in self.services.items():
             with self.subTest(service=name):
-                self.assertRegex(service.get("image", ""), PINNED_IMAGE)
+                if "build" in service:
+                    self.assertEqual(build_pin_problems(service), [])
+                else:
+                    self.assertRegex(service.get("image", ""), PINNED_IMAGE)
+
+    def test_autoheal_is_built_here(self):
+        # Upstream has no version tags: its Hub image is :latest, rebuilt daily.
+        self.assertIn("build", self.services[AUTOHEAL])
+        self.assertEqual(
+            self.services[AUTOHEAL]["build"]["context"].partition("#")[0],
+            "https://github.com/willfarrell/docker-autoheal.git",
+        )
+
+    def test_autoheal_runs_as_nobody_with_a_healthcheck(self):
+        autoheal = self.services[AUTOHEAL]
+        self.assertEqual(autoheal.get("user"), NOBODY)
+        self.assertTrue(autoheal.get("healthcheck", {}).get("test"), "no healthcheck")
+        # The image installs tzdata, so TZ gives its log local times.
+        self.assertIn("tzdata", autoheal["build"]["dockerfile_inline"])
+        self.assertIn("TZ", autoheal.get("environment", {}))
+
+    def test_autoheal_waits_for_a_restart_to_finish(self):
+        # Autoheal's curl gives up after CURL_TIMEOUT seconds, restart included. A restart
+        # waits up to the stop timeout for the container to stop, then starts it: with a
+        # client timeout no longer than that, Autoheal logged a restart that went through
+        # as failed. The proxy must not cut the request first either.
+        environment = self.services[AUTOHEAL].get("environment", {})
+        curl_timeout = int(environment.get("CURL_TIMEOUT", "30"))
+        stop_timeouts = [int(environment.get("AUTOHEAL_DEFAULT_STOP_TIMEOUT", "10"))]
+        stop_timeouts += [
+            int(service["labels"]["autoheal.stop.timeout"])
+            for service in self.services.values()
+            if "autoheal.stop.timeout" in service.get("labels", {})
+        ]
+        self.assertGreaterEqual(curl_timeout, max(stop_timeouts) + RESTART_MARGIN)
+        self.assertLess(curl_timeout, proxy_server_timeout_seconds())
 
     def test_every_service_but_autoheal_and_its_proxy_has_the_autoheal_label(self):
         for name, service in self.services.items():
@@ -342,6 +461,11 @@ class ComposeTests(unittest.TestCase):
             with self.subTest(service=name):
                 self.assertEqual(service.get("restart"), "unless-stopped")
 
+    def test_hardened_services_have_a_healthcheck(self):
+        for name in HARDENED:
+            with self.subTest(service=name):
+                self.assertTrue(self.services[name].get("healthcheck", {}).get("test"))
+
     def test_qsticky_reaches_qbittorrent_over_loopback(self):
         # qBittorrent skips authentication for loopback clients (LocalHostAuth=false, set by
         # the init script), which is why qSticky's password is not checked; see below.
@@ -405,6 +529,79 @@ class ComposeTests(unittest.TestCase):
     def test_firefox_cursor_size_matches_the_theme(self):
         size = self.services["firefox"].get("environment", {}).get("XCURSOR_SIZE")
         self.assertEqual(size, str(generator_nominal_size()))
+
+
+class BuildPinRuleTests(unittest.TestCase):
+    """build_pin_problems accepts a build only when its inputs are fixed."""
+
+    COMMIT = "f535158fbafcc34b2329249b5eaa1f3224cf9a32"
+    DIGEST = "be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a"
+
+    def service(self) -> dict:
+        return {
+            "image": f"vpn-in-container/autoheal:f535158-alpine3.24.3-{self.DIGEST[:12]}",
+            "pull_policy": "never",
+            "build": {
+                "context": f"https://github.com/willfarrell/docker-autoheal.git#{self.COMMIT}",
+                "dockerfile_inline": f"FROM alpine:3.24.3@sha256:{self.DIGEST}\nRUN true\n",
+                "labels": {
+                    "org.opencontainers.image.revision": self.COMMIT,
+                    "org.opencontainers.image.base.name": "alpine:3.24.3",
+                    "org.opencontainers.image.base.digest": f"sha256:{self.DIGEST}",
+                },
+            },
+        }
+
+    def test_a_pinned_build_passes(self):
+        self.assertEqual(build_pin_problems(self.service()), [])
+
+    def test_unpinned_builds_fail(self):
+        def context(value):
+            return lambda s: s["build"].update(context=value)
+
+        def dockerfile(value):
+            return lambda s: s["build"].update(dockerfile_inline=value)
+
+        repo = "https://github.com/willfarrell/docker-autoheal.git"
+        cases = {
+            "short commit": context(f"{repo}#f535158"),
+            "branch": context(f"{repo}#main"),
+            "no ref": context(repo),
+            "a commit and a subdirectory": context(f"{repo}#{self.COMMIT}:sub"),
+            "not GitHub": context(f"https://example.com/x/y.git#{self.COMMIT}"),
+            "local context": context("."),
+            "FROM by tag only": dockerfile("FROM alpine:3.24.3\n"),
+            "FROM by digest only": dockerfile(f"FROM alpine@sha256:{self.DIGEST}\n"),
+            "FROM from a build arg": dockerfile(
+                f"ARG A=3.24.3@sha256:{self.DIGEST}\nFROM alpine:${{A}}\n"
+            ),
+            "an unpinned second stage": dockerfile(
+                f"FROM alpine:3.24.3@sha256:{self.DIGEST} AS one\nFROM alpine:3.24\n"
+            ),
+            "a syntax line": dockerfile(
+                f"# syntax=docker/dockerfile:1\nFROM alpine:3.24.3@sha256:{self.DIGEST}\n"
+            ),
+            "no dockerfile_inline": lambda s: s["build"].pop("dockerfile_inline"),
+            "the context's Dockerfile": lambda s: s["build"].update(dockerfile="Dockerfile"),
+            "build args": lambda s: s["build"].update(args={"ALPINE_VERSION": "3.18"}),
+            "pull_policy missing": lambda s: s.pop("pull_policy"),
+            "pull_policy build": lambda s: s.update(pull_policy="build"),
+            "a tag without the inputs": lambda s: s.update(
+                image="vpn-in-container/autoheal:latest"
+            ),
+            "a tag with an old commit": lambda s: s.update(
+                image=f"vpn-in-container/autoheal:0000000-alpine3.24.3-{self.DIGEST[:12]}"
+            ),
+            "a label with an old commit": lambda s: s["build"]["labels"].update(
+                {"org.opencontainers.image.revision": "0" * 40}
+            ),
+            "no labels": lambda s: s["build"].pop("labels"),
+        }
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                service = self.service()
+                change(service)
+                self.assertNotEqual(build_pin_problems(service), [])
 
 
 if __name__ == "__main__":

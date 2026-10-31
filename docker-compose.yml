@@ -1,4 +1,4 @@
-# Log rotation for every service but Autoheal (each refers to this with `logging: *logging`).
+# Log rotation for every service (each refers to this with `logging: *logging`).
 # Explicit, because the daemon's default differs per host: OrbStack rotates json-file logs
 # (20 MB x 5), a stock Docker Engine keeps them without limit. json-file is Docker's default
 # driver, so the files stay where and how log tools expect them; `docker logs` reads the
@@ -373,12 +373,49 @@ services:
   # Autoheal - Restarts unhealthy containers
   # ===========================================
   autoheal:
-    # No version tags: the project rebuilds :latest daily. Pinned to a build by digest.
-    # Pinned by tag and digest; upgrade deliberately and run tests/stack/run.sh.
-    image: willfarrell/autoheal:latest@sha256:c4227b7a25b8ef08829ad3ad440af3a821e4277c9b1b2050a3f671ad9d87bfc6
+    # willfarrell/docker-autoheal, built here: one POSIX sh script (docker-entrypoint, MIT
+    # license) at a fixed commit, on a digest-pinned Alpine with curl, jq and tzdata. Upstream
+    # has no version tags; its Hub image is :latest, rebuilt daily on Alpine 3.18 (end of
+    # life), and old digests lose their tag. README.md (Autoheal's image) says how to update it.
+    # The tag names the commit, the Alpine version and its digest: change it with them, or
+    # `docker compose up -d` keeps using the image built from the old ones.
+    image: vpn-in-container/autoheal:f535158-alpine3.24.3-be2656061b53
+    # Never pulled, only built: `docker compose up -d` builds it when it is missing (the
+    # first build fetches the commit from GitHub), and plain `docker compose pull` skips it.
+    pull_policy: never
+    build:
+      context: https://github.com/willfarrell/docker-autoheal.git#f535158fbafcc34b2329249b5eaa1f3224cf9a32
+      # Not upstream's Dockerfile, which fetches an unpinned BuildKit frontend
+      # (`# syntax = docker/dockerfile:latest`) and builds on alpine:3.18. The script sets a
+      # default for every variable that Dockerfile sets in ENV.
+      dockerfile_inline: |
+        FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+        RUN apk add --no-cache curl jq tzdata
+        COPY --chmod=0755 docker-entrypoint /docker-entrypoint
+        ENTRYPOINT ["/docker-entrypoint"]
+        CMD ["autoheal"]
+      # What it was built from (tests/stack/run.sh compares these with the running image's).
+      labels:
+        org.opencontainers.image.source: https://github.com/willfarrell/docker-autoheal
+        org.opencontainers.image.revision: f535158fbafcc34b2329249b5eaa1f3224cf9a32
+        org.opencontainers.image.base.name: alpine:3.24.3
+        org.opencontainers.image.base.digest: sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
     container_name: autoheal
+    logging: *logging
     # unless-stopped, like every service (see vpn).
     restart: unless-stopped
+    # As nobody, with no capabilities and a read-only root: the script only runs curl and
+    # jq, talks to the proxy over the network and writes no file.
+    user: "65534:65534"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true  # see vpn
+    # See vpn. sh, curl and jq: 14 MiB, 8 tasks (through tests/stack/run.sh and both
+    # tests/stack/recovery.sh scenarios, which restart three services in a row).
+    pids_limit: 64
+    mem_limit: 64m
     # No Docker socket: autoheal reaches the Docker API only through autoheal-proxy, on an
     # internal network with no route out.
     networks:
@@ -388,14 +425,30 @@ services:
         condition: service_healthy
     environment:
       - DOCKER_SOCK=tcp://autoheal-proxy:2375
-      # Only heal containers labelled `autoheal=true` (this project's services).
+      # Only heal containers labeled `autoheal=true` (this project's services).
       # `all` would restart every unhealthy container on the host, including
       # containers belonging to unrelated Docker Compose projects.
       - AUTOHEAL_CONTAINER_LABEL=autoheal
       - AUTOHEAL_INTERVAL=10
       - AUTOHEAL_START_PERIOD=120
       - AUTOHEAL_DEFAULT_STOP_TIMEOUT=30
+      # Seconds curl waits for Docker's answer, a restart's included: a restart waits up to
+      # the stop timeout for the container to stop, then starts it. At the default (30, the
+      # same as the stop timeout), a restart that needed the whole stop timeout went through
+      # but was logged as "Restarting container ... failed". It must stay below the proxy's
+      # `timeout server` (2m, config/autoheal-proxy/haproxy.cfg).
+      - CURL_TIMEOUT=90
+      # Log times in local time (the image has tzdata)
       - TZ=${TZ:-America/New_York}
+    # Healthy = the call Autoheal makes every interval, the container list, gets through the
+    # proxy to Docker. (The script is PID 1: the container runs only while it does.)
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 5 -o /dev/null \"http://$${DOCKER_SOCK#tcp://}/containers/json?limit=1\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+      start_interval: 2s
 
   # ===========================================
   # Autoheal's Docker socket proxy

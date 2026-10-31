@@ -40,7 +40,7 @@ A Docker Compose stack providing a privacy-focused, containerized browsing envir
   ~/Downloads/vpn-in-container/
 
   [Autoheal] ── monitors this stack's containers through [autoheal-proxy]
-              ── restarts any that become unhealthy
+              ── restarts any that become unhealthy (built here from a fixed commit)
   [autoheal-proxy] ── the only container with the Docker socket; lets
                       Autoheal list containers and restart one, nothing else
 ```
@@ -239,7 +239,7 @@ docker compose ps
 docker compose logs autoheal
 ```
 
-Logs are rotated: each service but Autoheal keeps at most three 10 MB files (`x-logging` in
+Logs are rotated: each service keeps at most three 10 MB files (`x-logging` in
 `docker-compose.yml`), whatever the Docker host's default is. `docker compose logs` reads the
 older files too. Changing the setting takes effect when a container is recreated
 (`docker compose up -d` after the edit).
@@ -255,7 +255,7 @@ The stack automatically recovers from host sleep, reboot, or VPN disconnects usi
 | qBittorrent | WebUI API + the VPN's network is live (Gluetun's port 8000) | 10s |
 | Firefox | noVNC web UI + the VPN's network is live (Gluetun's port 8000) | 10s |
 | qSticky | Gluetun's port 8000 + qBittorrent's port 9080 | 10s |
-| Autoheal | Checks for unhealthy containers | 10s |
+| Autoheal | Its container list gets through the proxy to Docker (it looks for unhealthy containers every 10s) | 30s |
 
 Firefox, qBittorrent and qSticky share the VPN container's network. If the Gluetun container
 restarts, they are left on its old, dead network, where nothing listens on port 8000: they turn
@@ -290,6 +290,40 @@ reboot (or a Docker restart) it starts the containers that were running. After
   checks every 30-60 seconds).
 
 Additionally, `depends_on: restart: true` ensures `docker compose restart vpn` cascades to all dependent services.
+
+### Autoheal's Image
+
+Autoheal is built on this computer, not pulled. willfarrell/docker-autoheal has no version
+tags: its Docker Hub image is `:latest`, rebuilt every day on Alpine 3.18 (no longer
+supported), and an old digest loses its tag. `docker-compose.yml` builds the project's one
+script, `docker-entrypoint` (MIT license), from GitHub at a fixed commit (the full SHA), on
+Alpine pinned by digest, with curl, jq and tzdata from Alpine's packages. It runs as `nobody`,
+with a read-only root and no capabilities. The build does not use upstream's Dockerfile, which
+fetches an unpinned BuildKit frontend and builds on Alpine 3.18.
+
+- The first `docker compose up -d` (or `./start.sh`) builds it, which needs github.com and
+  Alpine's package mirror (dl-cdn.alpinelinux.org) to be reachable. After that, `up` reuses the
+  image, offline too. If the repository ever disappears, the built image keeps working; a new
+  build would need `docker-entrypoint` copied into this repository (keep its MIT notice) and
+  built from a local context.
+- `docker compose pull` skips it (`pull_policy: never`): there is nothing to pull. Without that
+  setting, a plain `docker compose pull` fails ("pull access denied"); `docker compose pull
+  --ignore-buildable` skips it either way. Do not use `docker compose up --pull always`: it
+  overrides the policy and looks for the name on Docker Hub.
+- Alpine's fixes for curl, jq and tzdata, with nothing else changed:
+  `docker compose build --no-cache autoheal && docker compose up -d`.
+- A new Alpine (a 3.24.x point release, or a new digest for the same version): get the digest
+  with `docker buildx imagetools inspect alpine:<version>` (the first `Digest:` line). In
+  `docker-compose.yml`, change the `FROM` line, the two `org.opencontainers.image.base.*`
+  labels and the image tag (`<first 7 of the commit>-alpine<version>-<first 12 hex of the
+  digest>`) together; `python3 -m unittest discover -s tests` fails if they disagree. The tag
+  names the inputs so that `docker compose up -d` builds a new image instead of reusing the one
+  built from the old inputs. Then run `docker compose up -d` and `tests/stack/run.sh`, which
+  checks that the running image carries the new labels.
+- A newer upstream commit: read what changed in `docker-entrypoint` first (it can restart
+  containers), in a clone: `git diff f535158 <commit> -- docker-entrypoint`. Then change the
+  full SHA in the build `context`, the `org.opencontainers.image.revision` label and the image
+  tag together, and run the tests as above.
 
 ## Verification
 
@@ -559,25 +593,25 @@ vpn-in-container/
   "Unauthorized".
 - All traffic is blocked if VPN disconnects (kill switch)
 - DNS queries go through the VPN (DNS-over-TLS)
-- Container hardening (`docker-compose.yml`), on every service except Autoheal:
+- Container hardening (`docker-compose.yml`), on every service:
   - `no-new-privileges`: no setuid, setgid or file-capability binary can raise a process's
     privileges. The images' init starts as root and drops to its user with syscalls,
     which this does not affect.
   - Capabilities: each service drops all of them and adds back only what its image needs: Gluetun
     `NET_ADMIN`, `NET_RAW`, `CHOWN`, `DAC_OVERRIDE`; Firefox `CHOWN`, `DAC_OVERRIDE`, `FOWNER`,
     `SETUID`, `SETGID`, `KILL`, `NET_BIND_SERVICE`; qBittorrent `CHOWN`, `DAC_OVERRIDE`,
-    `SETUID`, `SETGID`, `KILL`; qSticky and the socket proxy none. The comments in
+    `SETUID`, `SETGID`, `KILL`; qSticky, Autoheal and the socket proxy none. The comments in
     `docker-compose.yml` say what breaks without each.
   - Process and memory limits (`pids_limit`, `mem_limit`), so a runaway process stops in its own
     container instead of slowing the computer. Each is well above the peak measured: Firefox
     8 GB and 4096 processes and threads (20 busy tabs used 4.3 GB and 1,311), qBittorrent 2 GB,
-    Gluetun 512 MB, qSticky 256 MB, the socket proxy 128 MB. A container that runs out restarts
-    (Firefox loses its tabs); raise `mem_limit` in `docker-compose.yml` if you keep many more
-    tabs open.
-  - Read-only root filesystems for Firefox, qSticky and the socket proxy, with tmpfs mounts where
-    they write (`/tmp` and `/run`; qSticky's `/app/health`). Not for Gluetun, which writes
-    `/etc/passwd` and `/etc/resolv.conf` at start, or qBittorrent, whose image ignores
-    `PUID`/`PGID` when read-only.
+    Gluetun 512 MB, qSticky 256 MB, the socket proxy 128 MB, Autoheal 64 MB. A container that
+    runs out restarts (Firefox loses its tabs); raise `mem_limit` in `docker-compose.yml` if you
+    keep many more tabs open.
+  - Read-only root filesystems for Firefox, qSticky, Autoheal and the socket proxy, with tmpfs
+    mounts where they write (`/tmp` and `/run`; qSticky's `/app/health`). Autoheal also runs as
+    `nobody` (user 65534). Not for Gluetun, which writes `/etc/passwd` and `/etc/resolv.conf` at
+    start, or qBittorrent, whose image ignores `PUID`/`PGID` when read-only.
 - Only `autoheal-proxy` mounts the Docker socket. The `:ro` on that mount does not limit the
   API (a read-only mount does not stop connecting to a socket, and every API call, writes
   included, goes over that connection); the proxy's allowlist does. Autoheal
