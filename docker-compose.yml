@@ -98,7 +98,9 @@ services:
     volumes:
       # Firefox configuration persistence
       - ./config/firefox:/config:rw
-      # Download folder (also serves as qBittorrent watch folder for .torrent handoff)
+      # Download folder (also serves as qBittorrent watch folder for .torrent handoff).
+      # DOWNLOADS_PATH defaults to ${HOME}/Downloads/vpn-in-container here and below;
+      # .env.example and the README document the same default.
       - ${DOWNLOADS_PATH:-${HOME}/Downloads/vpn-in-container}/downloads:/config/downloads:rw
       # Firefox policies (force-installs Torrent Control extension)
       - ./config/firefox-policies/policies.json:/etc/firefox/policies/policies.json:ro
