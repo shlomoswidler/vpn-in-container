@@ -165,6 +165,7 @@ docker compose stop
   - Pop-ups, Shift+click and "Open in New Window" open tabs instead.
   - Ctrl+N, Ctrl+Shift+P, Ctrl+Shift+N and Ctrl+Shift+W do nothing, and the menu
     items that open or close windows are hidden.
+  - Closing the last tab opens a new tab; the window stays.
   - Ctrl+Q still quits Firefox (the image's shutdown script relies on it); the
     container then stops and restarts.
   - Settings: the single-window `FF_PREF_*` entries in `docker-compose.yml`,

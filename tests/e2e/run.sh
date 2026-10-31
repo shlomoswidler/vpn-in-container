@@ -184,8 +184,14 @@ check_cell() {
 # a real preference. The image splits each value on its first "=" into a pref
 # name and value; a value without "=" silently becomes a pref named after the
 # whole string (so "autostart:true" never turned private browsing on).
+# The image writes each as a user_pref line in prefs.js at every start, but
+# when Firefox rewrites prefs.js it leaves out a user value equal to the
+# default. Such an entry passes if one of Firefox's default pref files sets the
+# same value (it is then in effect either way, and the line comes back at the
+# next start if the default changes).
+FIREFOX_DEFAULT_PREFS="/usr/lib/firefox/defaults/pref /usr/lib/firefox/browser/defaults/preferences"
 check_prefs() {
-    local i env name value pref_value line
+    local i env name value pref_value line default
     for ((i = 0; i < ${#SERVICE_ARGS[@]}; i++)); do
         env=${SERVICE_ARGS[$i]}
         [[ "${SERVICE_ARGS[$((i - 1))]:-}" == "-e" && "$env" == FF_PREF_* ]] || continue
@@ -199,8 +205,11 @@ check_prefs() {
         fi
         pref_value=${value#*=}
         line="user_pref(\"${value%%=*}\", $pref_value);"
+        default="pref(\"${value%%=*}\", $pref_value);"
         if docker exec "$CONTAINER" grep -qxF "$line" /config/profile/prefs.js; then
             echo "ok    $name -> $line"
+        elif docker exec "$CONTAINER" sh -c "grep -qxF -r -e '$default' $FIREFOX_DEFAULT_PREFS"; then
+            echo "ok    $name -> the default is the same: $default"
         else
             echo "FAIL  $name: prefs.js has no line $line"
             failures=$((failures + 1))
@@ -561,6 +570,8 @@ check_single_window second-tab-torn-off "shift-click main" - \
 check_single_window popup "shift-click main popup" popup \
     in_x xdotool mousemove "$((DISPLAY_W / 2))" "$popup_y" click 1
 # These come last: a failure here closes Firefox and stops the container.
+# Closing the last tab must leave the window open with a new tab: that is
+# browser.tabs.closeWindowWithLastTab=false (FF_PREF_KEEP_WINDOW_WITH_LAST_TAB).
 check_single_window ctrl-shift-w "shift-click main popup" - in_x xdotool key ctrl+shift+w
 check_single_window ctrl-w-every-tab untitled untitled close_tabs main shift-click untitled
 

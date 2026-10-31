@@ -133,6 +133,12 @@ services:
       - FF_PREF_TAB_DETACH=browser.tabs.allowTabDetach=false
       # Pages' window.open() popups open as tabs, and pages can't move or resize windows
       - FF_PREF_POPUPS_IN_TABS=browser.link.open_newwindow.restriction=0
+      # Closing the last tab (Ctrl+W) opens a new one instead of closing the window, whose
+      # end would stop the container. The image's firefox-branding.js sets the same, but the
+      # single window must not depend on an image default (Firefox's own is true). While the
+      # two agree, Firefox leaves the line out when it rewrites prefs.js; the image writes it
+      # again at every start.
+      - FF_PREF_KEEP_WINDOW_WITH_LAST_TAB=browser.tabs.closeWindowWithLastTab=false
       - FF_PREF_NO_WINDOW_MOVE_RESIZE=dom.disable_window_move_resize=true
       # WebRTC never offers a page this container's addresses (eth0's on the Docker network,
       # tun0's in the tunnel), only what STUN servers see: the VPN's exit address. Firefox
