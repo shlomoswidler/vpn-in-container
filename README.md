@@ -101,6 +101,10 @@ apikey = "your_actual_api_key_here"
 
 ### 4. Create Downloads Directory
 
+Torrents go to `~/Downloads/vpn-in-container`, and Firefox's downloads (including `.torrent` files
+for qBittorrent) to its `downloads/` subfolder. To use another folder, set `DOWNLOADS_PATH` in
+`.env` (`${HOME}` works there, `~` does not), and create that folder's `downloads/` instead.
+
 ```bash
 mkdir -p "$HOME/Downloads/vpn-in-container/downloads"
 ```
@@ -452,7 +456,8 @@ docker compose down && docker compose up -d
 2. Check qBittorrent watch folder is `/watch` (Options → Downloads → Monitored folders). The init
    script adds it at every start if `config/qbittorrent/qBittorrent/watched_folders.json` lacks
    it, and leaves the file alone if it is not valid JSON (see `docker compose logs qbittorrent`)
-3. Verify `~/Downloads/vpn-in-container/downloads` exists and has correct permissions
+3. Verify `~/Downloads/vpn-in-container/downloads` (or `$DOWNLOADS_PATH/downloads`) exists and has
+   correct permissions
 
 ### Can't Access Web UIs
 
@@ -511,7 +516,7 @@ vpn-in-container/
 │   ├── qbittorrent/fresh-install.sh  # The init script on an empty /config (watch folder)
 │   └── browser/run.sh      # Patched noVNC in headless Chrome and Firefox
 
-~/Downloads/vpn-in-container/           # Host downloads directory
+~/Downloads/vpn-in-container/           # Host downloads directory (DOWNLOADS_PATH in .env)
 ├── downloads/              # Firefox downloads + .torrent file handoff
 ├── incomplete/             # In-progress torrent downloads
 └── [completed torrents]    # Completed downloads

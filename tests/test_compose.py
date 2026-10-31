@@ -120,6 +120,51 @@ class EnvExampleTests(unittest.TestCase):
                     self.assertNotIn("#", line.split("=", 1)[1], line)
 
 
+class DownloadsPathTests(unittest.TestCase):
+    """One default for DOWNLOADS_PATH: the compose file's, which .env.example documents."""
+
+    DEFAULT = Path(os.environ["HOME"]) / "Downloads" / "vpn-in-container"
+    # The example line in .env.example, commented out so the compose default applies.
+    EXAMPLE = "# DOWNLOADS_PATH=${HOME}/Downloads/vpn-in-container"
+
+    def mounts(self, env_file: Path, **variables: str | None) -> dict[str, str]:
+        services = compose_config(env_file, **variables)["services"]
+        found = {}
+        for name, target in (
+            ("qbittorrent", "/downloads"),
+            ("qbittorrent", "/watch"),
+            ("firefox", "/config/downloads"),
+        ):
+            sources = [v["source"] for v in services[name]["volumes"] if v["target"] == target]
+            found[target] = sources[0] if sources else ""
+        return found
+
+    def expected(self, root: Path) -> dict[str, str]:
+        return {
+            "/downloads": str(root),
+            "/watch": str(root / "downloads"),
+            "/config/downloads": str(root / "downloads"),
+        }
+
+    def test_env_example_yields_the_default(self):
+        self.assertEqual(self.mounts(ENV_FILE, DOWNLOADS_PATH=None), self.expected(self.DEFAULT))
+
+    def test_the_documented_example_line_is_the_default(self):
+        lines = ENV_FILE.read_text().splitlines()
+        self.assertIn(self.EXAMPLE, lines)
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / ".env"
+            # Uncommented, it gives the same path: ${HOME} is interpolated in .env files.
+            env_file.write_text(self.EXAMPLE.removeprefix("# ") + "\n")
+            self.assertEqual(
+                self.mounts(env_file, DOWNLOADS_PATH=None), self.expected(self.DEFAULT)
+            )
+            env_file.write_text("DOWNLOADS_PATH=/srv/torrents\n")
+            self.assertEqual(
+                self.mounts(env_file, DOWNLOADS_PATH=None), self.expected(Path("/srv/torrents"))
+            )
+
+
 class QstickyPasswordTests(unittest.TestCase):
     """QBITTORRENT_PASS is only what qSticky sends when it logs in: optional, no default."""
 

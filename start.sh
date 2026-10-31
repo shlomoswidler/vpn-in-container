@@ -6,6 +6,8 @@
 # PUID and PGID: a value from the environment or from .env is used as it is
 # (Compose reads .env itself; the environment wins over .env). Only when
 # neither sets one does this script use your own IDs (id -u, id -g).
+# DOWNLOADS_PATH is left to Compose: from the environment or .env, or else the
+# compose file's default, ${HOME}/Downloads/vpn-in-container.
 # START_WAIT_TIMEOUT: seconds to wait for the services (default 300).
 
 set -euo pipefail
