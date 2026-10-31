@@ -17,7 +17,7 @@
 #     watched
 #   - docker stop lets qBittorrent exit cleanly, before the stop timeout
 #
-# The container gets the service's security options and capabilities
+# The container gets the service's security options, capabilities and limits
 # (tests/run_args.py), so this also checks that the image works as hardened
 # as the service, on a volume with Linux file ownership.
 #

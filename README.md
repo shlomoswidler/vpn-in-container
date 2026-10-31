@@ -558,6 +558,11 @@ vpn-in-container/
     `SETUID`, `SETGID`, `KILL`, `NET_BIND_SERVICE`; qBittorrent `CHOWN`, `DAC_OVERRIDE`,
     `SETUID`, `SETGID`, `KILL`; qSticky and the socket proxy none. The comments in
     `docker-compose.yml` say what breaks without each.
+  - Process and memory limits (`pids_limit`, `mem_limit`), so a runaway process stops in its own
+    container instead of slowing the computer. Each is well above the peak measured: Firefox
+    8 GB and 4096 processes and threads (20 busy tabs used 4.3 GB and 1,311), qBittorrent 2 GB,
+    Gluetun 512 MB, qSticky 256 MB, the socket proxy 128 MB. A container that runs out restarts
+    (Firefox loses its tabs); raise `mem_limit` in `docker-compose.yml` if you keep many more tabs open.
 - Only `autoheal-proxy` mounts the Docker socket. The `:ro` on that mount does not limit the
   API (a read-only mount does not stop connecting to a socket, and every API call, writes
   included, goes over that connection); the proxy's allowlist does. Autoheal

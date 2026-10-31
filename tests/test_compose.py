@@ -347,6 +347,20 @@ class ComposeTests(unittest.TestCase):
                 self.assertEqual(len(added), len(set(added)), f"duplicates in {added}")
                 self.assertEqual(set(added), needed)
 
+    def test_hardened_services_have_pid_and_memory_limits(self):
+        for name in HARDENED:
+            with self.subTest(service=name):
+                service = self.services[name]
+                self.assertGreater(service.get("pids_limit", 0), 0, "no pids_limit")
+                self.assertGreater(int(service.get("mem_limit", 0)), 0, "no mem_limit")
+
+    def test_firefox_memory_limit_leaves_room_beyond_its_shared_memory(self):
+        # /dev/shm is a tmpfs: what Firefox keeps there counts against the memory limit.
+        firefox = self.services["firefox"]
+        self.assertGreaterEqual(
+            int(firefox.get("mem_limit", 0)), 3 * int(firefox.get("shm_size", 0))
+        )
+
     def test_firefox_cursor_size_matches_the_theme(self):
         size = self.services["firefox"].get("environment", {}).get("XCURSOR_SIZE")
         self.assertEqual(size, str(generator_nominal_size()))
