@@ -61,6 +61,8 @@ FIREFOX_PREFS = {
     # WebRTC: gather only on the default route's interface, and offer no host candidate.
     "media.peerconnection.ice.default_address_only=true",
     "media.peerconnection.ice.no_host=true",
+    # Closing the last tab leaves the window (closing it would stop the container).
+    "browser.tabs.closeWindowWithLastTab=false",
 }
 # Every hardened service's logging: json-file, rotated at 10 MB, three files kept.
 LOGGING = {"driver": "json-file", "options": {"max-size": "10m", "max-file": "3"}}
