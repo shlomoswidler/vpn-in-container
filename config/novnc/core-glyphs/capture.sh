@@ -20,7 +20,9 @@ set -euo pipefail
 GLYPH_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$GLYPH_DIR/../../.." && pwd)
 CONTAINER="core-glyph-capture-$$"
-PROBE_IMAGE=python:3.13-alpine
+# Runs tests/e2e/rfb_cursor_probe.py. Pinned by tag and multi-arch index digest
+# (Python 3.13.18 on Alpine 3.24; `docker buildx imagetools inspect` shows the digest).
+PROBE_IMAGE=python:3.13-alpine@sha256:7984cf56ceaddebe4fefeb75d64000b9f45d8b77b11a09b24524da6cdc3af0c8
 WORK=$(mktemp -d)
 
 cleanup() {
