@@ -5,7 +5,9 @@
 # (no outside access): a seeder with random multi-file content, and a leecher
 # that downloads it from the seeder only (private torrent, no trackers, DHT,
 # PeX or LSD; the peer is added by address). Then checks every downloaded
-# file's SHA-256 against the original and runs qBittorrent's own recheck.
+# file's SHA-256 against the original and runs qBittorrent's own recheck:
+# with the torrent stopped, one changed byte must make the recheck report that
+# piece missing, and restoring it must make the recheck report 100% again.
 # Written for the libtorrent 2.1 reports of downloads that never finish or
 # report 100% early.
 #
@@ -102,6 +104,39 @@ wait_complete() {
     return 1
 }
 
+# Prints the test torrent's piece states in CONTAINER as one digit per piece
+# (0 = missing, 1 = downloading, 2 = verified).
+piece_states() {
+    api "$1" "torrents/pieceStates?hash=$HASH" | python3 -I -c '
+import json, sys
+print("".join(str(state) for state in json.load(sys.stdin)))' 2>/dev/null ||
+        echo "error"
+}
+
+# Waits until the test torrent in CONTAINER has state STATE and piece states
+# PIECES (see piece_states).
+wait_pieces() {
+    local container=$1 state=$2 pieces=$3 deadline=$((SECONDS + TIMEOUT)) status actual
+    while ((SECONDS < deadline)); do
+        status=$(torrent_status "$container")
+        actual=$(piece_states "$container")
+        if [[ "${status#* }" == "$state" && "$actual" == "$pieces" ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "      $container: expected $state, pieces $pieces" >&2
+    echo "      got '$status', pieces $actual after ${TIMEOUT}s" >&2
+    return 1
+}
+
+# Writes the byte with octal value OCTAL at the start of FILE (a path under
+# /downloads) inside CONTAINER, without truncating the file.
+write_first_byte() {
+    docker exec "$1" sh -c 'printf "\\$1" | dd of="$2" bs=1 count=1 conv=notrunc 2>/dev/null' \
+        sh "$2" "$3"
+}
+
 failures=0
 pass() { printf 'ok    %s\n' "$*"; }
 fail() {
@@ -183,12 +218,34 @@ else
     fail "$mismatches downloaded file(s) differ from the original"
 fi
 
-api "$LEECHER" torrents/recheck --data "hashes=$HASH" >/dev/null
-sleep 2
-if wait_complete "$LEECHER"; then
-    pass "qBittorrent's own recheck of the download: 100%"
+# qBittorrent's own recheck. The torrent is stopped first, so nothing is
+# downloaded again and only a recheck can change its pieces. Changing the
+# first byte of the first file must make a recheck report piece 0 missing;
+# restoring the byte must make a second recheck report every piece again. A
+# recheck that never runs, or that does not read the data, fails one of them.
+api "$LEECHER" torrents/stop --data "hashes=$HASH" >/dev/null
+read -r _ first_relative < <(sed -n 2p "$WORK/manifest")
+first_file="/downloads/qbt-download-test/$first_relative"
+original=$(head -c 1 "$WORK/content/qbt-download-test/$first_relative" | od -An -tu1 | tr -d ' ')
+all_pieces=$(piece_states "$LEECHER")
+if [[ "$all_pieces" =~ ^2+$ ]] && wait_pieces "$LEECHER" stoppedUP "$all_pieces"; then
+    missing_first="0${all_pieces:1}"
+    write_first_byte "$LEECHER" "$(printf '%03o' $((original ^ 255)))" "$first_file"
+    api "$LEECHER" torrents/recheck --data "hashes=$HASH" >/dev/null
+    if wait_pieces "$LEECHER" stoppedDL "$missing_first"; then
+        pass "recheck after changing one byte: piece 0 of ${#all_pieces} missing"
+    else
+        fail "recheck did not find the changed piece"
+    fi
+    write_first_byte "$LEECHER" "$(printf '%03o' "$original")" "$first_file"
+    api "$LEECHER" torrents/recheck --data "hashes=$HASH" >/dev/null
+    if wait_pieces "$LEECHER" stoppedUP "$all_pieces" && wait_complete "$LEECHER"; then
+        pass "qBittorrent's own recheck of the restored download: 100%"
+    else
+        fail "qBittorrent's recheck of the restored download did not reach 100%"
+    fi
 else
-    fail "qBittorrent's recheck of the download did not reach 100%"
+    fail "the stopped download does not have every piece: '$all_pieces'"
 fi
 
 if ((failures > 0)); then
