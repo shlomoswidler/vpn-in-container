@@ -37,6 +37,11 @@
 # service mounts at /config/downloads (here a temporary directory). A server
 # inside the container's network namespace serves the file.
 #
+# Scenario 8 checks that WebRTC offers a page no host candidate (no local
+# address), even a page that captures the microphone, while a STUN server's
+# reflexive address still comes through. Dummy interfaces and a STUN server in
+# the container's network namespace stand in for the network.
+#
 # Usage: tests/e2e/run.sh   (needs docker, python3 and node on the host)
 
 set -euo pipefail
@@ -50,7 +55,7 @@ PROBE_IMAGE=python:3.13.18-alpine3.24@sha256:7984cf56ceaddebe4fefeb75d64000b9f45
 WORK=$(mktemp -d)
 
 cleanup() {
-    docker rm -f "$CONTAINER-web" "$CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f "$CONTAINER-web" "$CONTAINER-stun" "$CONTAINER" >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -661,6 +666,64 @@ if [[ -n "$downloaded" && -z "$prompts" ]]; then
 else
     printf 'FAIL  %-22s /config/downloads: %s; other windows: %s\n' torrent-download \
         "${listing:-(empty)}" "${prompts:-none}"
+    failures=$((failures + 1))
+fi
+
+# Firefox lets a page that captures the camera or microphone (a video call)
+# gather candidates on every interface and see their real addresses; for other
+# pages it already offers only the default route's address, hidden behind an
+# mDNS name. The FF_PREF_WEBRTC_* entries (docker-compose.yml) must keep even a
+# capturing page from seeing a host address: in the VPN's namespace those are
+# eth0's (the Docker network) and tun0's. The server-reflexive address (the
+# VPN's exit address, as STUN servers see it) is still offered.
+# Here two dummy interfaces stand in for eth0 and tun0, the second with the
+# default route, and stun_server.py, listening in the namespace, reports
+# STUN_MAPPED as the reflexive address. The test prefs grant the page a fake
+# microphone without a prompt, and make it count as capturing. Dummy
+# interfaces send nothing anywhere: the container still has no network.
+echo "== scenario 8: WebRTC offers no host candidates, even to a capturing page"
+STUN_MAPPED=203.0.113.7 # a documentation address (RFC 5737), on no interface
+OTHER_ADDRESS=10.99.0.2 # webrtc-page.html asks for the STUN server here
+DEFAULT_ADDRESS=10.98.0.2
+checks=$((checks + 1))
+start_firefox_windowed webrtc-page.html "e2e webrtc page" \
+    -e FF_PREF_E2E_GUM_NO_PROMPT=media.navigator.permission.disabled=true \
+    -e FF_PREF_E2E_GUM_FAKE=media.navigator.streams.fake=true \
+    -e FF_PREF_E2E_GUM_FAKE_CAPTURES=media.navigator.permission.fake=true
+docker run --rm --network "container:$CONTAINER" --cap-add NET_ADMIN "$PROBE_IMAGE" sh -c "
+    ip link add e2e-other type dummy && ip addr add $OTHER_ADDRESS/24 dev e2e-other &&
+    ip link set e2e-other up &&
+    ip link add e2e-default type dummy && ip addr add $DEFAULT_ADDRESS/24 dev e2e-default &&
+    ip link set e2e-default up && ip route add default dev e2e-default"
+docker run -d --rm --name "$CONTAINER-stun" --network "container:$CONTAINER" \
+    -v "$E2E_DIR:/e2e:ro" "$PROBE_IMAGE" \
+    python -I /e2e/stun_server.py 3478 "$STUN_MAPPED" >/dev/null
+# Port 3478 is 0D96 in /proc/net/udp.
+deadline=$((SECONDS + 30))
+until docker exec "$CONTAINER" grep -q ':0D96 ' /proc/net/udp; do
+    if ((SECONDS >= deadline)); then
+        echo "FAIL: stun_server.py did not start" >&2
+        docker logs "$CONTAINER-stun" >&2
+        exit 1
+    fi
+    sleep 0.5
+done
+in_x xdotool windowactivate --sync "$WINDOW" mousemove "$((DISPLAY_W / 2))" "$((DISPLAY_H / 2))" click 1
+result=""
+deadline=$((SECONDS + 30))
+while ((SECONDS < deadline)); do
+    result=$(shown_title) || true
+    [[ "$result" == webrtc-result* || "$result" == webrtc-error* ]] && break
+    sleep 0.5
+done
+# "webrtc-result host=<addresses> srflx=<addresses> raddr=<addresses>": no host
+# candidate, the reflexive address, and no local address anywhere (not even as
+# a reflexive candidate's related address).
+if [[ "$result" == "webrtc-result host= srflx=$STUN_MAPPED "* &&
+    "$result" != *"$DEFAULT_ADDRESS"* && "$result" != *"$OTHER_ADDRESS"* ]]; then
+    printf 'ok    %-22s %s\n' webrtc-candidates "$result"
+else
+    printf 'FAIL  %-22s %s\n' webrtc-candidates "${result:-(no result)}"
     failures=$((failures + 1))
 fi
 

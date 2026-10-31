@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>e2e webrtc page</title>
+<style>
+html, body { margin: 0; height: 100%; font: 16px sans-serif; }
+#start { position: fixed; inset: 0; width: 100%; border: 2px solid #888; }
+</style>
+</head>
+<body>
+<!-- A click (from run.sh, once the test network is up) captures the microphone,
+     as a video call site would, then gathers ICE candidates through the STUN
+     server run.sh starts at 10.99.0.2:3478, and puts what it found in the
+     title: "webrtc-result host=<addresses> srflx=<addresses> raddr=<addresses>",
+     comma-separated, or "webrtc-error <message>". -->
+<button id="start">Gather ICE candidates</button>
+<script>
+"use strict";
+async function gather() {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:10.99.0.2:3478" }] });
+    for (const track of stream.getTracks()) {
+        pc.addTrack(track, stream);
+    }
+    const found = { host: [], srflx: [], raddr: [] };
+    const complete = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("gathering did not finish in 20 s")), 20000);
+        pc.onicecandidate = (event) => {
+            if (!event.candidate || !event.candidate.candidate) {
+                clearTimeout(timer);
+                resolve();
+                return;
+            }
+            // candidate:<foundation> <component> <transport> <priority> <address> <port> typ <type> [raddr <address> rport <port>]
+            const fields = event.candidate.candidate.split(" ");
+            const type = fields[fields.indexOf("typ") + 1];
+            (found[type] ||= []).push(fields[4]);
+            const raddr = fields.indexOf("raddr");
+            if (raddr >= 0) {
+                found.raddr.push(fields[raddr + 1]);
+            }
+        };
+    });
+    await pc.setLocalDescription(await pc.createOffer());
+    await complete;
+    // The capture lasts until gathering is done: it is what lifts Firefox's
+    // own limits for pages without camera or microphone access.
+    pc.close();
+    stream.getTracks().forEach((track) => track.stop());
+    // Each address once (several candidates can share one), in a fixed order.
+    return Object.entries(found)
+        .map(([type, list]) => `${type}=${[...new Set(list)].sort().join(",")}`)
+        .join(" ");
+}
+document.getElementById("start").addEventListener("click", () => {
+    document.title = "webrtc-gathering";
+    gather().then(
+        (result) => { document.title = `webrtc-result ${result}`; },
+        (error) => { document.title = `webrtc-error ${error.message}`; },
+    );
+}, { once: true });
+</script>
+</body>
+</html>

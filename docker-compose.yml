@@ -134,6 +134,15 @@ services:
       # Pages' window.open() popups open as tabs, and pages can't move or resize windows
       - FF_PREF_POPUPS_IN_TABS=browser.link.open_newwindow.restriction=0
       - FF_PREF_NO_WINDOW_MOVE_RESIZE=dom.disable_window_move_resize=true
+      # WebRTC never offers a page this container's addresses (eth0's on the Docker network,
+      # tun0's in the tunnel), only what STUN servers see: the VPN's exit address. Firefox
+      # already does that for most pages, but not for one that uses the camera or microphone
+      # (a video call): it gets every interface's real address. default_address_only gathers
+      # on the default route's interface (tun0) only; no_host keeps its address out of the
+      # offer too. The reflexive (STUN) and relay candidates are still offered: a peer outside
+      # the VPN could reach only those anyway (tests/e2e/run.sh scenario 8).
+      - FF_PREF_WEBRTC_DEFAULT_ADDRESS=media.peerconnection.ice.default_address_only=true
+      - FF_PREF_WEBRTC_NO_HOST=media.peerconnection.ice.no_host=true
       # Marker cursor theme (mounted below): each cursor names a CSS cursor keyword, and the
       # patched noVNC shows the viewer's own native cursor for it (see config/cursors/README.md).
       # The size must match NOMINAL_SIZE in config/cursors/generate_native_theme.py.
