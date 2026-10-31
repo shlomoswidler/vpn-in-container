@@ -80,6 +80,25 @@ if [[ " ${SERVICE_ARGS[*]} " != *" $NATIVE_CSS_SOURCE:"* ]]; then
     exit 1
 fi
 
+# The display size the firefox service asks for, as "WIDTHxHEIGHT".
+display_size() {
+    local arg width="" height=""
+    for arg in "${SERVICE_ARGS[@]}"; do
+        case "$arg" in
+            DISPLAY_WIDTH=*) width=${arg#*=} ;;
+            DISPLAY_HEIGHT=*) height=${arg#*=} ;;
+        esac
+    done
+    echo "${width}x${height}"
+}
+# Scenario coordinates are fractions of this size, or offsets from its edges
+# for the toolbar items Firefox anchors there.
+IFS=x read -r DISPLAY_W DISPLAY_H <<<"$(display_size)"
+if ! [[ "$DISPLAY_W" =~ ^[0-9]+$ && "$DISPLAY_H" =~ ^[0-9]+$ ]]; then
+    echo "FAIL: the firefox service sets no numeric DISPLAY_WIDTH/DISPLAY_HEIGHT" >&2
+    exit 1
+fi
+
 # Starts the test container with the native-css theme from THEME_DIR and waits
 # for the test page. Sets WINDOW to Firefox's X window id.
 start_firefox() {
@@ -195,40 +214,31 @@ check_cell 2 "default"   # cursor: help
 check_cell 7 "image:any" # cursor: crosshair
 check_cell 8 "text"      # cursor: text
 
-# Starts a normal Firefox window (not kiosk) on about:blank, so the tab strip
-# and toolbar exist. Sets WINDOW to Firefox's X window id.
+# Starts a normal Firefox window (not kiosk), so the tab strip and toolbar
+# exist, on the test page PAGE (blank-page.html by default) and waits until
+# its window title contains TITLE. Sets WINDOW to Firefox's X window id.
 start_firefox_windowed() {
+    local page=${1:-blank-page.html} title=${2:-e2e blank page}
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     docker run -d --rm --name "$CONTAINER" --network none --shm-size 1g \
         "${SERVICE_ARGS[@]}" \
-        -e FF_OPEN_URL=about:blank \
+        -e "FF_OPEN_URL=file:///e2e/$page" \
         -e FF_PREF_NO_DATA_BAR=datareporting.policy.dataSubmissionPolicyBypassNotification=true \
+        -v "$E2E_DIR:/e2e:ro" \
         "$IMAGE" >/dev/null
-    echo "waiting for the Firefox window..."
+    echo "waiting for Firefox to show $page..."
+    WINDOW=""
     for _ in $(seq 1 90); do
-        if in_x xdotool search --classname Navigator >/dev/null 2>&1; then
-            break
+        WINDOW=$(in_x xdotool search --classname Navigator 2>/dev/null | head -n 1) || true
+        if [[ -n "$WINDOW" ]] &&
+            [[ "$(in_x xdotool getwindowname "$WINDOW" 2>/dev/null)" == *"$title"* ]]; then
+            return 0
         fi
         sleep 1
     done
-    WINDOW=$(in_x xdotool search --classname Navigator | head -n 1) || {
-        echo "FAIL: Firefox never opened a window" >&2
-        docker logs "$CONTAINER" 2>&1 | tail -30 >&2
-        exit 1
-    }
-    sleep 6  # let the toolbars finish layout
-}
-
-# The display size the firefox service asks for, as "WIDTHxHEIGHT".
-display_size() {
-    local arg width="" height=""
-    for arg in "${SERVICE_ARGS[@]}"; do
-        case "$arg" in
-            DISPLAY_WIDTH=*) width=${arg#*=} ;;
-            DISPLAY_HEIGHT=*) height=${arg#*=} ;;
-        esac
-    done
-    echo "${width}x${height}"
+    echo "FAIL: Firefox never showed $page" >&2
+    docker logs "$CONTAINER" 2>&1 | tail -30 >&2
+    exit 1
 }
 
 # Presses BUTTON (with MODIFIER, or "none") at (X,Y), drags to (X2,Y2), reads
@@ -271,11 +281,20 @@ check_drag() {
 
 echo "== scenario 3: toolbar and Alt drags do not start an Openbox move/resize"
 start_firefox_windowed
-# Coordinates assume the 1920x1080 display and a fresh profile with one tab.
-check_drag tab-strip-gutter none 1 1000 20 1150 22 default
-check_drag toolbar-space none 1 1750 64 1780 66 default
-check_drag alt-left-drag alt 1 900 500 1100 600 default
-check_drag alt-right-drag alt 3 1500 800 1200 600 default
+# A fresh profile with one tab. The tab strip (y 20) and toolbar (y 64) rows are
+# Firefox's own fixed sizes. Empty tab-strip space is right of the middle (the
+# one tab and the new-tab button are at the left); empty toolbar space is left
+# of the buttons Firefox anchors to the right edge. The Alt drags are in the
+# page, around its center. Measured at 1920x1080, where these are the points
+# (1000,20), (1750,64), (900,500) and (1500,800).
+mid_x=$((DISPLAY_W / 2))
+mid_y=$((DISPLAY_H / 2))
+check_drag tab-strip-gutter none 1 $((mid_x + 40)) 20 $((mid_x + 190)) 22 default
+check_drag toolbar-space none 1 $((DISPLAY_W - 170)) 64 $((DISPLAY_W - 140)) 66 default
+check_drag alt-left-drag alt 1 $((mid_x - 60)) $((mid_y - 40)) \
+    $((mid_x + 140)) $((mid_y + 60)) default
+check_drag alt-right-drag alt 3 $((mid_x + 540)) $((mid_y + 260)) \
+    $((mid_x + 240)) $((mid_y + 60)) default
 
 # Hovers (X,Y) and checks the cursor's classification equals EXPECTED.
 check_point() {
@@ -324,6 +343,31 @@ check_point library-top-edge "$center_x" $((lib_y - 18)) glyph:ns-resize
 check_point library-bottom-edge "$center_x" $((lib_y + lib_h + 1)) glyph:ns-resize
 check_drag library-title-drag none 1 "$center_x" $((lib_y - 10)) \
     $((center_x + 100)) $((lib_y + 90)) glyph:move
+
+# Prints the title of the page Firefox shows: its window title without the
+# " — Mozilla Firefox" suffix, or "" for a page without a title.
+shown_title() {
+    local name
+    name=$(in_x xdotool getwindowname "$WINDOW") || return 1
+    name=${name% — Mozilla Firefox}
+    [[ "$name" == "Mozilla Firefox" ]] && name=""
+    printf '%s\n' "$name"
+}
+
+# Waits up to 15 s until the title of the page Firefox shows starts with
+# PREFIX (is "" when PREFIX is ""), and prints that title.
+wait_title() {
+    local prefix=$1 deadline=$((SECONDS + 15)) title
+    while ((SECONDS < deadline)); do
+        if title=$(shown_title) &&
+            { [[ -z "$prefix" && -z "$title" ]] || [[ -n "$prefix" && "$title" == "$prefix"* ]]; }; then
+            printf '%s\n' "$title"
+            return 0
+        fi
+        sleep 0.2
+    done
+    return 1
+}
 
 # Drags with the left button from (X,Y) to (X2,Y2) in 20 steps, as a person would.
 drag() {
@@ -374,14 +418,23 @@ check_single_window() {
 echo "== scenario 5: Firefox stays one maximized window"
 start_firefox_windowed
 in_x xdotool windowactivate --sync "$WINDOW"
-# Coordinates assume the 1920x1080 display; the first tab's handle is at (100,20).
-check_single_window only-tab-dragged-down drag 100 20 1500 600
-check_single_window only-tab-dragged-left drag 100 20 300 700
+# The first tab's handle is at (100,20) at any display size (tabs start at the
+# left and have a fixed width). Tabs are dropped into the right and left parts
+# of the page.
+drop_right_x=$((DISPLAY_W * 3 / 4))
+drop_right_y=$((DISPLAY_H * 5 / 9))
+drop_left_x=$((DISPLAY_W / 8))
+drop_left_y=$((DISPLAY_H * 2 / 3))
+check_single_window only-tab-dragged-down drag 100 20 "$drop_right_x" "$drop_right_y"
+check_single_window only-tab-dragged-left drag 100 20 "$drop_left_x" "$drop_left_y"
 check_single_window ctrl-n in_x xdotool key ctrl+n
 check_single_window ctrl-shift-p in_x xdotool key ctrl+shift+p
 in_x xdotool windowactivate --sync "$WINDOW" key ctrl+t
-sleep 1.5
-check_single_window second-tab-torn-off drag 100 20 1500 600
+if ! wait_title "" >/dev/null; then
+    echo "FAIL: Ctrl+T did not show a new tab" >&2
+    exit 1
+fi
+check_single_window second-tab-torn-off drag 100 20 "$drop_right_x" "$drop_right_y"
 # These come last: a failure here closes Firefox and stops the container.
 check_single_window ctrl-shift-w in_x xdotool key ctrl+shift+w
 check_single_window ctrl-w-every-tab in_x xdotool key ctrl+w sleep 1 key ctrl+w sleep 1 key ctrl+w
@@ -400,9 +453,16 @@ count_color() {
 echo "== scenario 6: the private browsing indicator is shown"
 start_firefox_windowed
 checks=$((checks + 1))
-size=$(display_size)
-summary=$(count_color 0 0 "${size%x*}" 44 8000d7 16)
-matches=$(sed -n 's/.*"matches": \([0-9]*\).*/\1/p' <<<"$summary")
+# The tab strip may still be drawing: read it until the icon shows, up to 15 s.
+deadline=$((SECONDS + 15))
+while :; do
+    summary=$(count_color 0 0 "$DISPLAY_W" 44 8000d7 16)
+    matches=$(sed -n 's/.*"matches": \([0-9]*\).*/\1/p' <<<"$summary")
+    if ((${matches:-0} >= 50 || SECONDS >= deadline)); then
+        break
+    fi
+    sleep 1
+done
 if ((${matches:-0} >= 50)); then
     printf 'ok    %-22s %s\n' private-indicator "$summary"
 else
