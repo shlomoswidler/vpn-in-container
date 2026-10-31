@@ -266,7 +266,11 @@ Autoheal has no Docker socket of its own. It calls the Docker API through `autoh
 proxy's allowlist, `config/autoheal-proxy/haproxy.cfg`, passes only `GET /_ping`,
 `GET /containers/json` and `POST /containers/<full ID>/restart`; everything else gets 403. The
 proxy and Autoheal carry no `autoheal=true` label, since Autoheal cannot heal its own path to
-Docker; both use `restart: always`.
+Docker; Docker's restart policy brings either back if it exits.
+
+Every service uses `restart: unless-stopped`: Docker restarts a container that exits, and after a
+reboot (or a Docker restart) it starts the containers that were running. After
+`docker compose stop`, nothing comes back until `docker compose up -d` or `./start.sh`.
 
 **Recovery flow**:
 - VPN outage: Gluetun reconnects the tunnel itself (seconds); nothing else restarts.

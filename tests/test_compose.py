@@ -303,6 +303,13 @@ class ComposeTests(unittest.TestCase):
         ]
         self.assertEqual(rules, PROXY_RULES)
 
+    def test_every_service_uses_unless_stopped(self):
+        # One policy: with `always` on some services, `docker compose stop` and a reboot (or a
+        # Docker restart) bring only those back, the VPN without the services behind it.
+        for name, service in self.services.items():
+            with self.subTest(service=name):
+                self.assertEqual(service.get("restart"), "unless-stopped")
+
     def test_qsticky_reaches_qbittorrent_over_loopback(self):
         # qBittorrent skips authentication for loopback clients (LocalHostAuth=false, set by
         # the init script), which is why qSticky's password is not checked; see below.
