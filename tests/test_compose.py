@@ -14,6 +14,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -44,11 +45,19 @@ VPN = "vpn"
 BEHIND_VPN = ("firefox", "qbittorrent", "qsticky")
 
 
-def compose_config() -> dict:
-    """Return the resolved Compose model; raise AssertionError if it cannot be read."""
+def compose_config(env_file: Path = ENV_FILE, **variables: str | None) -> dict:
+    """Return the resolved Compose model; raise AssertionError if it cannot be read.
+
+    VARIABLES set (or, with None, remove) variables of the environment Compose runs in.
+    """
     env = {**os.environ, "PUID": str(os.getuid()), "PGID": str(os.getgid())}
+    for name, value in variables.items():
+        if value is None:
+            env.pop(name, None)
+        else:
+            env[name] = value
     command = [
-        "docker", "compose", "-f", str(COMPOSE_FILE), "--env-file", str(ENV_FILE),
+        "docker", "compose", "-f", str(COMPOSE_FILE), "--env-file", str(env_file),
         "config", "--format", "json",
     ]  # fmt: skip
     try:
@@ -109,6 +118,27 @@ class EnvExampleTests(unittest.TestCase):
             if "=" in line and not line.lstrip().startswith("#"):
                 with self.subTest(line=number):
                     self.assertNotIn("#", line.split("=", 1)[1], line)
+
+
+class QstickyPasswordTests(unittest.TestCase):
+    """QBITTORRENT_PASS is only what qSticky sends when it logs in: optional, no default."""
+
+    def password(self, env_file: Path, **variables: str | None) -> str | None:
+        config = compose_config(env_file, **variables)
+        return config["services"]["qsticky"].get("environment", {}).get("QBITTORRENT_PASS")
+
+    def test_env_example_sets_no_password(self):
+        self.assertEqual(self.password(ENV_FILE, QBITTORRENT_PASS=None), "")
+
+    def test_unset_means_empty_not_a_made_up_default(self):
+        # The old fallback, adminadmin, has not been qBittorrent's default since 4.6.1.
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / ".env"
+            env_file.write_text("COMPOSE_PROJECT_NAME=vpn-in-container\n")
+            self.assertEqual(self.password(env_file, QBITTORRENT_PASS=None), "")
+            env_file.write_text("QBITTORRENT_PASS=from-env-file\n")
+            self.assertEqual(self.password(env_file, QBITTORRENT_PASS=None), "from-env-file")
+            self.assertEqual(self.password(env_file, QBITTORRENT_PASS="from-shell"), "from-shell")
 
 
 class ComposeTests(unittest.TestCase):
@@ -227,6 +257,13 @@ class ComposeTests(unittest.TestCase):
             if line.strip().startswith("http-request")
         ]
         self.assertEqual(rules, PROXY_RULES)
+
+    def test_qsticky_reaches_qbittorrent_over_loopback(self):
+        # qBittorrent skips authentication for loopback clients (LocalHostAuth=false, set by
+        # the init script), which is why qSticky's password is not checked; see below.
+        environment = self.services["qsticky"].get("environment", {})
+        self.assertEqual(environment.get("QBITTORRENT_HOST"), "localhost")
+        self.assertEqual(self.services["qsticky"].get("network_mode"), f"service:{VPN}")
 
     def test_firefox_cursor_size_matches_the_theme(self):
         size = self.services["firefox"].get("environment", {}).get("XCURSOR_SIZE")
