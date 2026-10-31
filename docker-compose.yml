@@ -47,6 +47,8 @@ services:
     # Gluetun: 97 MiB, 29 tasks.
     pids_limit: 256
     mem_limit: 512m
+    # No read-only root: at start Gluetun adds its user to /etc/passwd and writes
+    # /etc/resolv.conf (nameserver 127.0.0.1, its DNS server, for every container here).
     devices:
       - /dev/net/tun:/dev/net/tun
     # Loopback only: neither web UI has a password. Without a host IP, Docker binds every
@@ -166,6 +168,12 @@ services:
       # the image's shutdown script sends it)
       - ./config/firefox-profile/customKeys.json:/config/profile/customKeys.json:ro
     shm_size: "2gb"
+    # Read-only root filesystem, as the image supports: it writes at run time only to /config
+    # (mounted above; the image links /var/tmp and /var/log there), /tmp, /run and /dev/shm.
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
     # See vpn. The init runs as root, creates the app user and hands it /config, then
     # starts each service as that user.
     cap_drop:
@@ -253,6 +261,10 @@ services:
     # files it reads count too, but the kernel frees those under the limit.
     pids_limit: 512
     mem_limit: 2g
+    # No read-only root: in read-only mode this image ignores PUID/PGID and runs qBittorrent
+    # as 911:1001, so it could not use files owned by PUID (measured: /config/qBittorrent
+    # became 911:1001, and the image says "the PUID/PGID environment variables will have no
+    # effect").
     volumes:
       # qBittorrent configuration
       - ./config/qbittorrent:/config
@@ -323,6 +335,10 @@ services:
     # See vpn. Python: 85 MiB, 9 tasks.
     pids_limit: 64
     mem_limit: 256m
+    # Read-only root filesystem: qSticky writes only its health file, in /app/health.
+    read_only: true
+    tmpfs:
+      - /app/health
     labels:
       # Opt-in marker for this project's autoheal instance (see autoheal service).
       # Scopes autoheal to these siblings only, never other stacks on this host.

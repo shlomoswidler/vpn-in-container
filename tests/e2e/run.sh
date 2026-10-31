@@ -81,7 +81,15 @@ while IFS= read -r arg; do
     SERVICE_ARGS+=("$arg")
 done < <(tail -n +2 "$WORK/service-args")
 echo "image: $IMAGE"
-printf '  %s\n' "${SERVICE_ARGS[@]}" | paste -d ' ' - -
+# One option per line, with its value if it has one (--read-only has none).
+for ((i = 0; i < ${#SERVICE_ARGS[@]}; i++)); do
+    if [[ "${SERVICE_ARGS[$i]}" == --read-only ]]; then
+        printf '  %s\n' "${SERVICE_ARGS[$i]}"
+    else
+        printf '  %s   %s\n' "${SERVICE_ARGS[$i]}" "${SERVICE_ARGS[$((i + 1))]}"
+        i=$((i + 1))
+    fi
+done
 NATIVE_CSS_SOURCE="$REPO/config/cursors/native-css"
 if [[ " ${SERVICE_ARGS[*]} " != *" $NATIVE_CSS_SOURCE:"* ]]; then
     echo "FAIL: the firefox service does not mount $NATIVE_CSS_SOURCE" >&2

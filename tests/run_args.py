@@ -4,7 +4,8 @@
 Reads `docker compose config --format json` on stdin; the service name is the argument.
 The tests that start a service's image in a throwaway container (tests/e2e/run.sh through
 service_args.py, tests/qbittorrent/fresh-install.sh) pass these on, so the image runs as
-hardened as the service: security_opt, capabilities and the PID and memory limits.
+hardened as the service: security_opt, capabilities, a read-only root with its tmpfs
+mounts, and the PID and memory limits.
 
 Usage: docker compose config --format json | python3 -I tests/run_args.py SERVICE
 """
@@ -22,6 +23,10 @@ def hardening_args(service: dict) -> list[str]:
         args += ["--cap-drop", capability]
     for capability in service.get("cap_add", []):
         args += ["--cap-add", capability]
+    if service.get("read_only"):
+        args.append("--read-only")
+    for target in service.get("tmpfs", []):
+        args += ["--tmpfs", target]
     if "pids_limit" in service:
         args += ["--pids-limit", str(service["pids_limit"])]
     if "mem_limit" in service:
