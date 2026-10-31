@@ -4,11 +4,18 @@
 
 # QBT_CONF_FILE overrides the path for tests (tests/test_qbittorrent_init.py).
 CONF_FILE="${QBT_CONF_FILE:-/config/qBittorrent/qBittorrent.conf}"
+# QBT_CONF_WAIT overrides how many seconds to wait for the config file, for tests.
+CONF_WAIT="${QBT_CONF_WAIT:-30}"
+
+if [[ ! "$CONF_WAIT" =~ ^(0|[1-9][0-9]*)$ ]]; then
+    echo "[qbt-init] QBT_CONF_WAIT must be a whole number of seconds, not '$CONF_WAIT'" >&2
+    exit 1
+fi
 
 echo "[qbt-init] Starting qBittorrent configuration..."
 
 # Wait for config file to exist (created on first run)
-for _ in {1..30}; do
+for ((i = 0; i < CONF_WAIT; i++)); do
     if [[ -f "$CONF_FILE" ]]; then
         break
     fi

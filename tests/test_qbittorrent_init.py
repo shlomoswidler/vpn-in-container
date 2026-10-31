@@ -8,6 +8,7 @@ own [WebUI] section). Run: python3 -m unittest discover -s tests
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -152,6 +153,74 @@ class InitScriptTests(unittest.TestCase):
         conf = FROM_53.replace("LocalHostAuth=true\n", "LocalHostAuth=true\nLocalHostAuth=true\n")
         sections = self.run_script(conf)
         self.assert_section(sections, "WebUI", {"LocalHostAuth": "false"})
+
+
+class MissingConfigTests(unittest.TestCase):
+    """The config file is created by qBittorrent's first start; the script waits for it.
+
+    QBT_CONF_WAIT (default 30) shortens the wait for these tests.
+    """
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.conf = self.dir / "qBittorrent" / "qBittorrent.conf"
+
+    def env(self, wait: str) -> dict[str, str]:
+        return {**os.environ, "QBT_CONF_FILE": str(self.conf), "QBT_CONF_WAIT": wait}
+
+    def run_script(self, wait: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["bash", str(SCRIPT)], env=self.env(wait), capture_output=True, text=True,
+            timeout=60, check=False,
+        )  # fmt: skip
+
+    def test_skips_and_exits_0_when_the_file_never_appears(self):
+        result = self.run_script("0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout,
+            "[qbt-init] Starting qBittorrent configuration...\n"
+            "[qbt-init] Config file not found, skipping\n",
+        )
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(list(self.dir.iterdir()), [], "created a file or directory")
+
+    def test_waits_the_given_number_of_seconds(self):
+        start = time.monotonic()
+        result = self.run_script("2")
+        elapsed = time.monotonic() - start
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Config file not found, skipping", result.stdout)
+        self.assertGreaterEqual(elapsed, 2)
+        self.assertLess(elapsed, 10)
+
+    def test_configures_a_file_that_appears_while_waiting(self):
+        with subprocess.Popen(
+            ["bash", str(SCRIPT)], env=self.env("20"), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        ) as process:  # fmt: skip
+            time.sleep(1.5)
+            self.assertIsNone(process.poll(), "the script did not wait for the file")
+            self.conf.parent.mkdir()
+            self.conf.write_text(FROM_53)
+            stdout, stderr = process.communicate(timeout=30)
+        self.assertEqual(process.returncode, 0, stderr)
+        self.assertTrue(stdout.endswith("[qbt-init] Configuration complete\n"), stdout)
+        self.assertEqual(parse(self.conf.read_text())["WebUI"][0], ("Address", "*"))
+
+    def test_rejects_a_wait_that_is_not_a_whole_number(self):
+        for wait in ("abc", "-1", "1.5", "08", " 3"):
+            with self.subTest(wait=wait):
+                result = self.run_script(wait)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(
+                    result.stderr,
+                    f"[qbt-init] QBT_CONF_WAIT must be a whole number of seconds, not '{wait}'\n",
+                )
+                self.assertEqual(list(self.dir.iterdir()), [])
 
 
 if __name__ == "__main__":
