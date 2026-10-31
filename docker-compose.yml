@@ -1,3 +1,16 @@
+# Log rotation for every service but Autoheal (each refers to this with `logging: *logging`).
+# Explicit, because the daemon's default differs per host: OrbStack rotates json-file logs
+# (20 MB x 5), a stock Docker Engine keeps them without limit. json-file is Docker's default
+# driver, so the files stay where and how log tools expect them; `docker logs` reads the
+# rotated files too. At most 30 MB per container. The busiest is the socket proxy, which logs
+# Autoheal's poll every 10 seconds: about 3 MB a day, so 9 days kept. A change applies to a
+# container when it is next created.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   # ===========================================
   # VPN Container - All traffic routes through this
@@ -8,6 +21,7 @@ services:
     # Pinned by tag and digest; upgrade deliberately and run tests/stack/run.sh.
     image: qmcgaw/gluetun:v3.41.3@sha256:fa19cc76b2af13d57a8d3dc3066f2ada061b1c761b8aecf989b3877c0486e027
     container_name: gluetun-vpn
+    logging: *logging
     # Every capability is dropped, and each service adds back only what its image was
     # measured to need (tests/test_compose.py lists the sets; each one missing breaks
     # something, as noted). Gluetun runs as root:
@@ -88,6 +102,7 @@ services:
     # Re-check both before upgrading (see config/cursors/README.md).
     image: jlesage/firefox:v26.09.1@sha256:302aa068dcfa46a2d248771c998f67377383554df8940252caef42b99c13eb65
     container_name: firefox-novnc
+    logging: *logging
     network_mode: service:vpn
     depends_on:
       vpn:
@@ -206,6 +221,7 @@ services:
     # pin libtorrent. Downgrading loses the WebUI password (5.1 can't read the [WebUI] section).
     image: lscr.io/linuxserver/qbittorrent:5.3.0_v2.1.2-ls485@sha256:75ecbb1c89ab7b0a21c4bde40b4820e4f1649d2d56d83b91913422155e8d2a5f
     container_name: qbittorrent
+    logging: *logging
     network_mode: service:vpn
     depends_on:
       vpn:
@@ -269,6 +285,7 @@ services:
     # Pinned by tag and digest; upgrade deliberately and run tests/stack/run.sh.
     image: ghcr.io/monstermuffin/qsticky:2.4.3@sha256:27c19a7acc9fb8b39c2b5ebee3183190a3920afbb1c43342b01c7752c02a02d3
     container_name: qsticky
+    logging: *logging
     network_mode: service:vpn
     depends_on:
       vpn:
@@ -359,6 +376,7 @@ services:
     # Pinned by tag and digest; upgrade deliberately and run tests/stack/run.sh.
     image: lscr.io/linuxserver/socket-proxy:3.4.7-r0-ls104@sha256:4e5e59efd3338205561c54262581992036e5a36ccca97d487b1d4ec41f9adc58
     container_name: autoheal-proxy
+    logging: *logging
     # unless-stopped, like every service (see vpn).
     restart: unless-stopped
     # Root inside, with no capabilities: the socket's group differs per host (root on
