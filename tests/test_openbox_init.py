@@ -162,6 +162,81 @@ class OpenboxInitTests(unittest.TestCase):
             result.stderr, f"could not remove the Frame mouse context from {self.rc}\n"
         )
 
+    def with_client_bind(self, button: str, action: str) -> str:
+        """The fixture with one more binding in the Client context: BUTTON, ACTION, Move."""
+        client = '  <context name="Client">\n'
+        self.assertEqual(self.original.count(client), 1)
+        bind = (
+            f'    <mousebind button="{button}" action="{action}">\n'
+            '      <action name="Move"/>\n'
+            "    </mousebind>\n"
+        )
+        text = self.original.replace(client, client + bind)
+        # Where Openbox would read it: a binding of the Client context.
+        (context,) = mouse_context(ET.fromstring(text), "Client")
+        self.assertIn((button, action, ("Move",)), bindings(context))
+        return text
+
+    def test_58_fails_when_an_alt_drag_binding_is_in_another_context(self):
+        # The Frame context's own Alt+Left drag, moved to Client: removing Frame leaves it.
+        text = self.with_client_bind("A-Left", "Drag")
+        self.rc.write_text(text)
+        result = self.run_script(NO_ALT_DRAG)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(
+            result.stderr.startswith(f"Openbox still has an Alt+drag binding in {self.rc}:\n"),
+            result.stderr,
+        )
+        self.assertIn('<mousebind button="A-Left" action="Drag">', result.stderr)
+
+    def test_58_fails_for_every_way_openbox_reads_an_alt_drag(self):
+        # Openbox compares the action and each modifier without regard to case, reads a
+        # button attribute as a space-separated list, and takes A, Alt or Mod1 for Alt.
+        for button, action in (
+            ("a-left", "drag"),
+            ("Alt-Right", "Drag"),
+            ("Mod1-Middle", "DRAG"),
+            ("C-A-Left", "Drag"),
+            ("A-S-Button8", "Drag"),
+            ("W-Left A-Left", "Drag"),
+            ("A-Left", " Drag "),
+        ):
+            with self.subTest(button=button, action=action):
+                self.rc.write_text(self.with_client_bind(button, action))
+                result = self.run_script(NO_ALT_DRAG)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Openbox still has an Alt+drag binding", result.stderr)
+
+    def test_58_keeps_drags_without_alt_and_alt_bindings_that_are_not_drags(self):
+        for button, action in (
+            ("W-Left", "Drag"),
+            ("S-Left", "Drag"),
+            ("Left", "Drag"),
+            ("A-Left", "Press"),
+            ("A-Left", "Click"),
+        ):
+            with self.subTest(button=button, action=action):
+                text = self.with_client_bind(button, action)
+                result = self.run_ok(NO_ALT_DRAG, text)
+                expected = self.without_frame_context(ET.fromstring(text))
+                self.assertEqual(structure(ET.fromstring(result)), structure(expected))
+
+    def test_58_fails_when_it_cannot_read_a_binding(self):
+        # The check reads each <mousebind> start tag as one line, as the image writes them.
+        # A tag split over lines could hide an Alt+drag, so the script must not pass it.
+        bind = '<mousebind button="A-Middle" action="Drag">'
+        text = self.with_client_bind("A-Middle", "Drag")
+        self.assertEqual(text.count(bind), 1)
+        text = text.replace(bind, '<mousebind button="A-Middle"\n              action="Drag">')
+        self.rc.write_text(text)
+        result = self.run_script(NO_ALT_DRAG)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            result.stderr,
+            f"cannot check {self.rc} for Alt+drag bindings: a <mousebind> tag does not have "
+            "its button and action on one line\n",
+        )
+
     def test_scripts_fail_when_rc_xml_is_missing(self):
         for script in (NO_KEEPBORDER, NO_ALT_DRAG):
             with self.subTest(script=script.name):
