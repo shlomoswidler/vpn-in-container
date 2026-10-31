@@ -78,6 +78,8 @@ nano .env  # or use your preferred editor
 Fill in these required values:
 - `WIREGUARD_PRIVATE_KEY`: Your ProtonVPN WireGuard private key
 - `GLUETUN_API_KEY`: The random key you generated above
+- `PUID` and `PGID`: the output of `id -u` and `id -g` (`docker compose` refuses to start without
+  them; `./start.sh` fills them in when they are empty)
 
 > **Note:** The `.env.example` includes `COMPOSE_PROJECT_NAME=vpn-in-container`. Do not remove this — it prevents Docker Compose from normalizing hyphens to underscores in volume mount paths, which would break all container configurations. See [Troubleshooting](#containers-start-with-empty-config--wrong-mount-paths) for details.
 

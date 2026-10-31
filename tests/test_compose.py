@@ -75,6 +75,42 @@ def generator_nominal_size() -> int:
     return module.NOMINAL_SIZE
 
 
+def run_compose_config(env_file: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
+    """Run `docker compose config --quiet` with ENV_FILE and exactly ENV."""
+    command = [
+        "docker", "compose", "-f", str(COMPOSE_FILE), "--env-file", str(env_file),
+        "config", "--quiet",
+    ]  # fmt: skip
+    return subprocess.run(
+        command, cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=60, check=False
+    )
+
+
+class EnvExampleTests(unittest.TestCase):
+    """An unedited copy of .env.example must fail loudly where it needs the user's values."""
+
+    def setUp(self):
+        # The environment without the variables .env.example is meant to supply.
+        self.env = {
+            k: v for k, v in os.environ.items() if k not in ("PUID", "PGID", "DOWNLOADS_PATH")
+        }
+
+    def test_puid_and_pgid_guards_fire_when_unset(self):
+        result = run_compose_config(ENV_FILE, self.env)
+        self.assertNotEqual(result.returncode, 0, "config passed with PUID and PGID unset")
+        self.assertIn("required variable PUID is missing a value: Set PUID in .env", result.stderr)
+        self.assertIn("required variable PGID is missing a value: Set PGID in .env", result.stderr)
+
+    def test_no_value_carries_an_inline_comment(self):
+        # Compose strips leading spaces from an unquoted value and then removes only a comment
+        # preceded by a space, so `PUID=   # Run: id -u` sets PUID to "# Run: id -u". Comments
+        # belong on their own lines.
+        for number, line in enumerate(ENV_FILE.read_text().splitlines(), 1):
+            if "=" in line and not line.lstrip().startswith("#"):
+                with self.subTest(line=number):
+                    self.assertNotIn("#", line.split("=", 1)[1], line)
+
+
 class ComposeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
