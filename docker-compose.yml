@@ -32,10 +32,12 @@ services:
       - NET_ADMIN
       # The ICMP health check's raw socket; without it Gluetun falls back to DNS checks for good
       - NET_RAW
-      # /tmp/gluetun/forwarded_port, which Gluetun creates for PUID in a directory it makes
-      # with mode 0644 (no search bit): without these, no port is forwarded
-      - CHOWN
-      - DAC_OVERRIDE
+    # Gluetun's status files, /tmp/gluetun/forwarded_port and /tmp/gluetun/ip: v3.41.3 makes
+    # the directory with mode 0644 (no search bit), so root would need DAC_OVERRIDE to create
+    # a file in it (without it, no port is forwarded). Gluetun keeps an existing directory as
+    # it is. Emptied at each start; Gluetun writes both files once the tunnel is up.
+    tmpfs:
+      - /tmp/gluetun:mode=0755
     # No setuid, setgid or file-capability binary can raise a process's privileges. Each
     # image's init starts as root and drops to its user with syscalls, which this allows.
     security_opt:
@@ -47,8 +49,9 @@ services:
     # Gluetun: 97 MiB, 29 tasks.
     pids_limit: 256
     mem_limit: 512m
-    # No read-only root: at start Gluetun adds its user to /etc/passwd and writes
-    # /etc/resolv.conf (nameserver 127.0.0.1, its DNS server, for every container here).
+    # No read-only root: at start Gluetun writes /etc/resolv.conf (nameserver 127.0.0.1, its
+    # DNS server, for every container here), and with a PUID other than 0 it adds that user
+    # to /etc/passwd.
     devices:
       - /dev/net/tun:/dev/net/tun
     # Loopback only: neither web UI has a password. Without a host IP, Docker binds every
@@ -59,6 +62,13 @@ services:
       # qBittorrent Web UI
       - "127.0.0.1:9080:9080"
     environment:
+      # Owner of the status files above (nothing reads them: qSticky asks the control server).
+      # Not a process user: Gluetun runs as root either way, and WireGuard runs inside it.
+      # With the default, 1000, Gluetun needs CHOWN to hand the files over and DAC_OVERRIDE to
+      # rewrite them (v3.42 also FOWNER, to chmod them). Not .env's PUID, which is for the
+      # services behind it.
+      - PUID=0
+      - PGID=0
       # ProtonVPN with WireGuard
       - VPN_SERVICE_PROVIDER=protonvpn
       - VPN_TYPE=wireguard

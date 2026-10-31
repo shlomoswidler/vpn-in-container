@@ -18,7 +18,8 @@
 #     TLS through the tunnel, and the outside world sees the TLS provider's
 #     resolver, not the host's
 #   - Gluetun's forwarded port is qBittorrent's listening port, and qSticky
-#     restores it after it is changed
+#     restores it after it is changed; Gluetun runs with only NET_ADMIN and
+#     NET_RAW, and still writes the port to its status file, as root's
 #   - Gluetun's control server refuses requests without the right API key, and
 #     with qSticky's valid key refuses (read-only) routes outside its role
 #   - qBittorrent's WebUI, API and settings, and the .torrent watch-folder
@@ -742,6 +743,46 @@ if [[ "$forwarded" =~ ^[0-9]+$ ]] && ((forwarded > 0)) && [[ "$listen" == "$forw
     pass "qBittorrent listens on Gluetun's forwarded port ($forwarded)"
 else
     fail "forwarded port '$forwarded', qBittorrent listen port '$listen'"
+fi
+# Gluetun's effective capabilities (CapEff in /proc, a hex bit mask), as
+# names: exactly NET_ADMIN and NET_RAW. Its status files need neither CHOWN nor
+# DAC_OVERRIDE with PUID and PGID 0 and the /tmp/gluetun tmpfs.
+vpn_caps=$(docker exec "$VPN" cat /proc/1/status 2>/dev/null | python3 -I -c '
+import sys
+names = """CHOWN DAC_OVERRIDE DAC_READ_SEARCH FOWNER FSETID KILL SETGID SETUID SETPCAP
+LINUX_IMMUTABLE NET_BIND_SERVICE NET_BROADCAST NET_ADMIN NET_RAW IPC_LOCK IPC_OWNER
+SYS_MODULE SYS_RAWIO SYS_CHROOT SYS_PTRACE SYS_PACCT SYS_ADMIN SYS_BOOT SYS_NICE
+SYS_RESOURCE SYS_TIME SYS_TTY_CONFIG MKNOD LEASE AUDIT_WRITE AUDIT_CONTROL SETFCAP
+MAC_OVERRIDE MAC_ADMIN SYSLOG WAKE_ALARM BLOCK_SUSPEND AUDIT_READ PERFMON BPF
+CHECKPOINT_RESTORE""".split()
+masks = [line.split()[1] for line in sys.stdin if line.startswith("CapEff:")]
+if not masks:
+    sys.exit("?")
+mask = int(masks[0], 16)
+print(" ".join(sorted(names[i] if i < len(names) else f"bit{i}" for i in range(64) if mask >> i & 1)) or "none")' 2>&1 || true)
+if [[ "$vpn_caps" == "NET_ADMIN NET_RAW" ]]; then
+    pass "Gluetun's effective capabilities are exactly NET_ADMIN and NET_RAW"
+else
+    fail "Gluetun's effective capabilities: $vpn_caps (want NET_ADMIN NET_RAW)"
+fi
+# Gluetun writes the forwarded port to its status file too, as root's (PUID
+# and PGID 0), and logs any failure to create, chown or rewrite it.
+port_file=$(compose_value vpn env:VPN_PORT_FORWARDING_STATUS_FILE)
+port_file=${port_file:-/tmp/gluetun/forwarded_port}
+port_file_content=$(docker exec "$VPN" cat "$port_file" 2>&1 || true)
+port_file_owner=$(docker exec "$VPN" stat -c '%u:%g' "$port_file" 2>&1 || true)
+if [[ "$forwarded" =~ ^[0-9]+$ ]] && ((forwarded > 0)) &&
+    [[ "$port_file_content" == "$forwarded" && "$port_file_owner" == 0:0 ]]; then
+    pass "$port_file holds the forwarded port ($forwarded) and is owned by 0:0"
+else
+    fail "$port_file holds '$port_file_content', owner '$port_file_owner' (want '$forwarded', 0:0)"
+fi
+vpn_log=$(docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' "$VPN")" "$VPN" 2>&1 || true)
+file_errors=$(grep -iE 'chown|chmod|permission denied|not permitted' <<<"$vpn_log" || true)
+if [[ -n "$vpn_log" && -z "$file_errors" ]]; then
+    pass "Gluetun logged no chown, chmod or permission error since it started"
+else
+    fail "Gluetun's log since it started: ${file_errors:-empty}"
 fi
 # qSticky's log since it started: it logged in to qBittorrent, and any error
 # (for example while qBittorrent was restarting) was followed by a successful

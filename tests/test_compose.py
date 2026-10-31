@@ -77,13 +77,23 @@ LOGGING = {"driver": "json-file", "options": {"max-size": "10m", "max-file": "3"
 # Each hardened service drops every capability and adds back only these, the set its image
 # was measured to need (docker-compose.yml says what each is for).
 CAPABILITIES = {
-    VPN: {"NET_ADMIN", "NET_RAW", "CHOWN", "DAC_OVERRIDE"},
+    VPN: {"NET_ADMIN", "NET_RAW"},
     "firefox": {"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "KILL", "NET_BIND_SERVICE"},
     "qbittorrent": {"CHOWN", "DAC_OVERRIDE", "SETUID", "SETGID", "KILL"},
     "qsticky": set(),
     AUTOHEAL: set(),
     AUTOHEAL_PROXY: set(),
 }
+# Where Gluetun keeps its status files (the forwarded port, the public IP), and the variables
+# that would move them: their defaults are in this directory.
+GLUETUN_STATUS_DIR = "/tmp/gluetun"
+GLUETUN_STATUS_FILE_VARIABLES = (
+    "VPN_PORT_FORWARDING_STATUS_FILE",
+    "PORT_FORWARDING_STATUS_FILE",
+    "PRIVATE_INTERNET_ACCESS_VPN_PORT_FORWARDING_STATUS_FILE",
+    "PUBLICIP_FILE",
+    "IP_STATUS_FILE",
+)
 # How much longer than the longest stop timeout Autoheal's curl must wait for a restart's
 # answer: the restart also starts the container again.
 RESTART_MARGIN = 30
@@ -489,6 +499,26 @@ class ComposeTests(unittest.TestCase):
                 added = service.get("cap_add", [])
                 self.assertEqual(len(added), len(set(added)), f"duplicates in {added}")
                 self.assertEqual(set(added), needed)
+
+    def test_gluetun_status_files_need_no_capability(self):
+        # Gluetun (v3.41.3) makes /tmp/gluetun with mode 0644, no search bit, so creating a
+        # file in it takes DAC_OVERRIDE, and it chowns each file it writes there to PUID:PGID,
+        # which takes CHOWN unless they are 0 (and DAC_OVERRIDE to rewrite a file owned by
+        # another user). A tmpfs made 0755 is a directory Gluetun keeps as it is, and with
+        # PUID and PGID 0 it writes root's files: no capability needed. Gluetun runs as root
+        # either way; PUID is not a process user with WireGuard.
+        vpn = self.services[VPN]
+        environment = vpn.get("environment", {})
+        self.assertEqual(environment.get("PUID"), "0")
+        self.assertEqual(environment.get("PGID"), "0")
+        self.assertIn(f"{GLUETUN_STATUS_DIR}:mode=0755", vpn.get("tmpfs", []))
+        # A status file moved out of the tmpfs would be back in a directory Gluetun cannot
+        # write without those capabilities (or in the ./config/gluetun bind mount).
+        for name in GLUETUN_STATUS_FILE_VARIABLES:
+            with self.subTest(variable=name):
+                path = environment.get(name)
+                if path is not None:
+                    self.assertTrue(path.startswith(f"{GLUETUN_STATUS_DIR}/"), path)
 
     def test_hardened_services_have_pid_and_memory_limits(self):
         for name in HARDENED:
