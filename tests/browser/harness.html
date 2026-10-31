@@ -34,8 +34,11 @@ const target = document.getElementById('target');
 const cursor = new Cursor();
 cursor.attach(target);
 
+// total is the number of cases checked, which run.sh compares with the number generated.
 const failures = [];
+let checked = 0;
 for (const { name, expected, rgba, w, h, hotx = 0, hoty = 0 } of cases) {
+    checked++;
     cursor.change(rgba, hotx, hoty, w, h);
     const inline = target.style.cursor;
     const computed = getComputedStyle(target).cursor;
@@ -51,11 +54,11 @@ for (const { name, expected, rgba, w, h, hotx = 0, hoty = 0 } of cases) {
     }
 }
 
-const passed = failures.length === 0;
+const passed = checked > 0 && failures.length === 0;
 document.body.className = passed ? 'pass' : 'fail';
 document.title = `cursor harness: ${passed ? 'PASS' : 'FAIL'}`;
 document.getElementById('result').textContent =
-    JSON.stringify({ total: cases.length, failed: failures.length, failures });
+    JSON.stringify({ total: checked, failed: failures.length, failures });
 </script>
 </body>
 </html>
