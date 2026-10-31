@@ -7,7 +7,9 @@
 #                in the same container; nothing may be restarted.
 #   restart      restarts the Gluetun container, which leaves Firefox, qBittorrent
 #                and qSticky on its old, dead network until Autoheal restarts them
-#                (Firefox's open tabs are lost). Autoheal must restart at least one.
+#                (Firefox's open tabs are lost). Autoheal must restart at least one,
+#                and each of its restarts must show in its Docker socket proxy's log
+#                as an allowed POST /containers/<id>/restart.
 #
 # Each first checks that the stack is healthy and leaves through the VPN (and
 # aborts otherwise), then records how many seconds pass until each part works
@@ -79,14 +81,15 @@ abort() {
 docker compose -f "$REPO/docker-compose.yml" config --format json >"$WORK/config.json"
 
 # Prints a value from the resolved compose config: compose_value SERVICE KEY
-# where KEY is "container" or "env:<NAME>".
+# where KEY is "container" or "env:<NAME>". Prints nothing for a service the
+# file lacks.
 compose_value() {
     python3 -I - "$WORK/config.json" "$1" "$2" <<'EOF'
 import json, sys
 config_path, service, key = sys.argv[1:]
-svc = json.load(open(config_path))["services"][service]
+svc = json.load(open(config_path))["services"].get(service, {})
 if key == "container":
-    print(svc["container_name"])
+    print(svc.get("container_name", ""))
 elif key.startswith("env:"):
     print(svc.get("environment", {}).get(key[4:], ""))
 EOF
@@ -97,6 +100,7 @@ FIREFOX=$(compose_value firefox container)
 QBT=$(compose_value qbittorrent container)
 QSTICKY=$(compose_value qsticky container)
 AUTOHEAL=$(compose_value autoheal container)
+PROXY=$(compose_value autoheal-proxy container)
 SHARING=("$FIREFOX" "$QBT" "$QSTICKY")
 # qSticky's Gluetun API key, to read the forwarded port (never printed).
 GLUETUN_API_KEY=$(compose_value qsticky env:GLUETUN_APIKEY)
@@ -173,6 +177,9 @@ precheck() {
     done
     [[ "$(docker inspect -f '{{.State.Running}}' "$AUTOHEAL" 2>/dev/null)" == true ]] ||
         abort "$AUTOHEAL is not running"
+    [[ -n "$PROXY" ]] || abort "docker-compose.yml has no autoheal-proxy service (Autoheal's Docker socket proxy)"
+    [[ "$(health "$PROXY")" == healthy ]] ||
+        abort "Autoheal's Docker socket proxy $PROXY is $(health "$PROXY"), not healthy"
     host_ip=""
     for _ in 1 2 3; do
         for url in $IP_SERVICES; do
@@ -466,6 +473,7 @@ scenario_tunnel_down() {
 # left on its old, dead network until Autoheal restarts them.
 scenario_restart() {
     local restart_time restart_epoch by_autoheal=0 started_list started container i events autoheal_log
+    local proxy_log id proxied
     precheck restart
     start_watch
     echo "== restart: restarting $VPN"
@@ -485,6 +493,9 @@ scenario_restart() {
     # depends_on restart applies only to docker compose commands, not to a
     # docker restart.)
     autoheal_log=$(docker logs --since "$restart_time" "$AUTOHEAL" 2>&1 || true)
+    # HAProxy's log, one line per request ("option httplog"): the status is the
+    # sixth field, the quoted request line the last.
+    proxy_log=$(docker logs --since "$restart_time" "$PROXY" 2>&1 || true)
     started_list=$(started_ns "${SHARING[@]}")
     [[ $(wc -w <<<"$started_list") -eq ${#SHARING[@]} ]] || fail "could not read StartedAt of: ${SHARING[*]}"
     i=0
@@ -496,7 +507,13 @@ scenario_restart() {
             echo "$container: not restarted (events: ${events:-none})"
         elif [[ "$autoheal_log" == *"Container /$container ("*"found to be unhealthy - Restarting"* ]]; then
             by_autoheal=$((by_autoheal + 1))
-            echo "$container: restarted by Autoheal (its log; Docker events: ${events:-none})"
+            id=$(docker inspect -f '{{.Id}}' "$container")
+            proxied=$(awk -v request="\"POST /containers/$id/restart?" \
+                'index($0, request) { print $6 }' <<<"$proxy_log" | paste -sd ' ' -)
+            echo "$container: restarted by Autoheal (its log; Docker events: ${events:-none}; through the proxy, HTTP: ${proxied:-none})"
+            if [[ " $proxied " != *" 204 "* ]]; then
+                fail "$container: no allowed (204) POST /containers/<id>/restart in $PROXY's log"
+            fi
         else
             echo "$container: restarted, but not by Autoheal (Docker events: ${events:-none})"
         fi
