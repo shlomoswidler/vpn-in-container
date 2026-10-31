@@ -32,6 +32,11 @@
 # Scenario 6 checks that Firefox's "Private browsing" indicator shows in the tab
 # strip (userChrome.css shows it when permanent private browsing is on).
 #
+# Scenario 7 checks the Firefox half of the .torrent handoff to qBittorrent: a
+# .torrent link downloads, without a prompt, into the directory the firefox
+# service mounts at /config/downloads (here a temporary directory). A server
+# inside the container's network namespace serves the file.
+#
 # Usage: tests/e2e/run.sh   (needs docker, python3 and node on the host)
 
 set -euo pipefail
@@ -45,7 +50,7 @@ PROBE_IMAGE=python:3.13.18-alpine3.24@sha256:7984cf56ceaddebe4fefeb75d64000b9f45
 WORK=$(mktemp -d)
 
 cleanup() {
-    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f "$CONTAINER-web" "$CONTAINER" >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -67,8 +72,8 @@ CELL_W=320
 CELL_H=135
 COLUMNS=6
 
-docker compose -f "$REPO/docker-compose.yml" config --format json \
-    | python3 -I "$E2E_DIR/service_args.py" > "$WORK/service-args"
+docker compose -f "$REPO/docker-compose.yml" config --format json > "$WORK/compose.json"
+python3 -I "$E2E_DIR/service_args.py" < "$WORK/compose.json" > "$WORK/service-args"
 
 IMAGE=$(head -n 1 "$WORK/service-args")
 SERVICE_ARGS=()
@@ -219,12 +224,14 @@ check_cell 8 "text"      # cursor: text
 
 # Starts a normal Firefox window (not kiosk), so the tab strip and toolbar
 # exist, on the test page PAGE (blank-page.html by default) and waits until
-# its window title contains TITLE. Sets WINDOW to Firefox's X window id.
+# its window title contains TITLE. Further arguments go to `docker run`. Sets
+# WINDOW to Firefox's X window id.
 start_firefox_windowed() {
     local page=${1:-blank-page.html} title=${2:-e2e blank page}
+    shift $(($# < 2 ? $# : 2))
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     docker run -d --rm --name "$CONTAINER" --network none --shm-size 1g \
-        "${SERVICE_ARGS[@]}" \
+        "${SERVICE_ARGS[@]}" "$@" \
         -e "FF_OPEN_URL=file:///e2e/$page" \
         -e FF_PREF_NO_DATA_BAR=datareporting.policy.dataSubmissionPolicyBypassNotification=true \
         -v "$E2E_DIR:/e2e:ro" \
@@ -572,6 +579,80 @@ if ((${matches:-0} >= 50)); then
     printf 'ok    %-22s %s\n' private-indicator "$summary"
 else
     printf 'FAIL  %-22s mask icon not in the tab strip: %s\n' private-indicator "$summary"
+    failures=$((failures + 1))
+fi
+
+# Firefox saves a .torrent link straight into /config/downloads, which
+# qBittorrent watches. The image's default prefs set browser.download.dir to
+# /config/downloads. Firefox 151 asks before saving a .torrent from a file: URL
+# (measured), so the file comes over HTTP, as application/x-bittorrent, from
+# torrent_server.py in the container's network namespace (the container still
+# has no network).
+echo "== scenario 7: a .torrent link downloads into /config/downloads without a prompt"
+TORRENT_PORT=8765 # download-page.html links to this port
+checks=$((checks + 1))
+if ! python3 -I -c '
+import json, sys
+volumes = json.load(sys.stdin)["services"]["firefox"].get("volumes", [])
+sys.exit(not any(v["target"] == "/config/downloads" and not v.get("read_only") for v in volumes))
+' < "$WORK/compose.json"; then
+    echo "FAIL  the firefox service mounts no writable directory at /config/downloads"
+    failures=$((failures + 1))
+else
+    echo "ok    the firefox service mounts a writable directory at /config/downloads"
+fi
+mkdir -p "$WORK/web" "$WORK/downloads"
+chmod 0777 "$WORK/downloads" # Firefox runs as the image's user
+python3 -I "$REPO/tests/qbittorrent/make_torrent.py" "$WORK/torrent-content" \
+    "$WORK/web/test.torrent" >/dev/null
+expected_sha=$(shasum -a 256 "$WORK/web/test.torrent" | cut -d ' ' -f 1)
+start_firefox_windowed download-page.html "e2e download page" \
+    -v "$WORK/downloads:/config/downloads"
+docker run -d --rm --name "$CONTAINER-web" --network "container:$CONTAINER" \
+    -v "$E2E_DIR:/e2e:ro" -v "$WORK/web:/srv:ro" "$PROBE_IMAGE" \
+    python -I /e2e/torrent_server.py "$TORRENT_PORT" /srv >/dev/null
+deadline=$((SECONDS + 30))
+until docker exec "$CONTAINER" wget -q -O /dev/null "http://127.0.0.1:$TORRENT_PORT/test.torrent" \
+    2>/dev/null; do
+    if ((SECONDS >= deadline)); then
+        echo "FAIL: torrent_server.py did not start" >&2
+        docker logs "$CONTAINER-web" >&2
+        exit 1
+    fi
+    sleep 0.5
+done
+checks=$((checks + 1))
+in_x xdotool windowactivate --sync "$WINDOW" mousemove "$((DISPLAY_W / 2))" "$((DISPLAY_H / 2))" click 1
+# Firefox writes NAME.part, then renames it. A save prompt would leave only the
+# .part file until someone answers it.
+deadline=$((SECONDS + 30))
+downloaded=""
+while ((SECONDS < deadline)); do
+    if [[ -f "$WORK/downloads/test.torrent" ]] &&
+        ! compgen -G "$WORK/downloads/*.part" >/dev/null &&
+        [[ "$(shasum -a 256 "$WORK/downloads/test.torrent" | cut -d ' ' -f 1)" == "$expected_sha" ]]; then
+        downloaded=yes
+        break
+    fi
+    sleep 0.5
+done
+listing=$(find "$WORK/downloads" -mindepth 1 -maxdepth 1 -exec basename {} \; | sort | paste -sd ' ' -)
+# Any visible window besides the browser window, except Firefox's pop-up panels
+# (role "Popup", such as the first private download's "Files stay on your
+# device" notice), would be a prompt such as "Opening test.torrent".
+prompts=""
+for window in $(in_x xdotool search --onlyvisible --name . 2>/dev/null || true); do
+    [[ "$window" != "$WINDOW" ]] || continue
+    properties=$(in_x obxprop --id "$window")
+    if ! grep -qxF 'WM_WINDOW_ROLE(STRING) = "Popup"' <<<"$properties"; then
+        prompts+="\"$(in_x xdotool getwindowname "$window")\" "
+    fi
+done
+if [[ -n "$downloaded" && -z "$prompts" ]]; then
+    printf 'ok    %-22s /config/downloads: %s\n' torrent-download "$listing"
+else
+    printf 'FAIL  %-22s /config/downloads: %s; other windows: %s\n' torrent-download \
+        "${listing:-(empty)}" "${prompts:-none}"
     failures=$((failures + 1))
 fi
 
