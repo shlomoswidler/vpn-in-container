@@ -155,6 +155,8 @@ docker compose stop
 - **Private browsing, always:** history, cookies and site data are not kept.
   The mask icon and "Private browsing" label at the right end of the tab strip
   show it is on (Firefox only shows it when it really is).
+- **WebRTC shows only the VPN's address:** web pages, video calls included, never see the
+  container's own network addresses (the `FF_PREF_WEBRTC_*` entries in `docker-compose.yml`).
 - **Your own mouse cursors:** the web UI shows your computer's native cursors
   (see [config/cursors/README.md](config/cursors/README.md)).
 - **One window:** Firefox stays a single maximized window, since the container

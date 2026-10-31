@@ -55,6 +55,13 @@ READ_ONLY_TMPFS = {
     "qsticky": {"/app/health"},
     AUTOHEAL_PROXY: {"/run"},
 }
+# Firefox preferences the firefox service must set through FF_PREF_* entries
+# (<pref name>=<value>; tests/e2e/run.sh checks that each reaches prefs.js).
+FIREFOX_PREFS = {
+    # WebRTC: gather only on the default route's interface, and offer no host candidate.
+    "media.peerconnection.ice.default_address_only=true",
+    "media.peerconnection.ice.no_host=true",
+}
 # Every hardened service's logging: json-file, rotated at 10 MB, three files kept.
 LOGGING = {"driver": "json-file", "options": {"max-size": "10m", "max-file": "3"}}
 # Each hardened service drops every capability and adds back only these, the set its image
@@ -387,6 +394,11 @@ class ComposeTests(unittest.TestCase):
         for name in HARDENED:
             with self.subTest(service=name):
                 self.assertEqual(self.services[name].get("logging"), LOGGING)
+
+    def test_firefox_sets_its_privacy_and_window_prefs(self):
+        environment = self.services["firefox"].get("environment", {})
+        prefs = {v for k, v in environment.items() if k.startswith("FF_PREF_")}
+        self.assertLessEqual(FIREFOX_PREFS, prefs)
 
     def test_firefox_cursor_size_matches_the_theme(self):
         size = self.services["firefox"].get("environment", {}).get("XCURSOR_SIZE")
