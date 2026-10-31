@@ -549,6 +549,10 @@ vpn-in-container/
   "Unauthorized".
 - All traffic is blocked if VPN disconnects (kill switch)
 - DNS queries go through the VPN (DNS-over-TLS)
+- Container hardening (`docker-compose.yml`), on every service except Autoheal:
+  - `no-new-privileges`: no setuid, setgid or file-capability binary can raise a process's
+    privileges. The images' init starts as root and drops to its user with syscalls,
+    which this does not affect.
 - Only `autoheal-proxy` mounts the Docker socket. The `:ro` on that mount does not limit the
   API (a read-only mount does not stop connecting to a socket, and every API call, writes
   included, goes over that connection); the proxy's allowlist does. Autoheal

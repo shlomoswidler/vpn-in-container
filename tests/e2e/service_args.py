@@ -4,7 +4,8 @@ into the image name (first line) and `docker run` arguments (one per line)
 that reproduce its browser setup: the XCURSOR_*, display and FF_PREF_*
 environment variables, and the read-only mounts under the cursor-related
 directories, the Firefox profile (userChrome.css, customKeys.json) and the
-Firefox install directory (autoconfig).
+Firefox install directory (autoconfig). It also carries the service's security
+options, so the test runs Firefox as hardened as the service.
 """
 
 import json
@@ -35,6 +36,8 @@ def service_args(config: dict) -> list[str]:
     for volume in service.get("volumes", []):
         if volume.get("read_only") and volume["target"].startswith(MOUNT_PREFIXES):
             lines += ["-v", f"{volume['source']}:{volume['target']}:ro"]
+    for option in service.get("security_opt", []):
+        lines += ["--security-opt", option]
     return lines
 
 
