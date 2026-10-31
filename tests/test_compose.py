@@ -47,6 +47,15 @@ BEHIND_VPN = ("firefox", "qbittorrent", "qsticky")
 # replaced by a hardened local build.
 HARDENED = (VPN, *BEHIND_VPN, AUTOHEAL_PROXY)
 NO_NEW_PRIVILEGES = "no-new-privileges:true"
+# Each hardened service drops every capability and adds back only these, the set its image
+# was measured to need (docker-compose.yml says what each is for).
+CAPABILITIES = {
+    VPN: {"NET_ADMIN", "NET_RAW", "CHOWN", "DAC_OVERRIDE"},
+    "firefox": {"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID", "KILL", "NET_BIND_SERVICE"},
+    "qbittorrent": {"CHOWN", "DAC_OVERRIDE", "SETUID", "SETGID", "KILL"},
+    "qsticky": set(),
+    AUTOHEAL_PROXY: set(),
+}
 
 
 def compose_config(env_file: Path = ENV_FILE, **variables: str | None) -> dict:
@@ -327,6 +336,16 @@ class ComposeTests(unittest.TestCase):
         for name in HARDENED:
             with self.subTest(service=name):
                 self.assertIn(NO_NEW_PRIVILEGES, self.services[name].get("security_opt", []))
+
+    def test_hardened_services_drop_every_capability_they_do_not_need(self):
+        self.assertEqual(set(CAPABILITIES), set(HARDENED))
+        for name, needed in CAPABILITIES.items():
+            with self.subTest(service=name):
+                service = self.services[name]
+                self.assertEqual(service.get("cap_drop"), ["ALL"])
+                added = service.get("cap_add", [])
+                self.assertEqual(len(added), len(set(added)), f"duplicates in {added}")
+                self.assertEqual(set(added), needed)
 
     def test_firefox_cursor_size_matches_the_theme(self):
         size = self.services["firefox"].get("environment", {}).get("XCURSOR_SIZE")

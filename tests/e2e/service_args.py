@@ -5,11 +5,16 @@ that reproduce its browser setup: the XCURSOR_*, display and FF_PREF_*
 environment variables, and the read-only mounts under the cursor-related
 directories, the Firefox profile (userChrome.css, customKeys.json) and the
 Firefox install directory (autoconfig). It also carries the service's security
-options, so the test runs Firefox as hardened as the service.
+options and capabilities (tests/run_args.py), so the test runs Firefox as
+hardened as the service.
 """
 
+import importlib.util
 import json
 import sys
+from pathlib import Path
+
+RUN_ARGS = Path(__file__).resolve().parent.parent / "run_args.py"
 
 ENV_KEYS = ("XCURSOR_THEME", "XCURSOR_SIZE", "DISPLAY_WIDTH", "DISPLAY_HEIGHT", "DARK_MODE")
 FF_PREF_PREFIX = "FF_PREF_"
@@ -36,9 +41,18 @@ def service_args(config: dict) -> list[str]:
     for volume in service.get("volumes", []):
         if volume.get("read_only") and volume["target"].startswith(MOUNT_PREFIXES):
             lines += ["-v", f"{volume['source']}:{volume['target']}:ro"]
-    for option in service.get("security_opt", []):
-        lines += ["--security-opt", option]
-    return lines
+    return lines + hardening_args(service)
+
+
+def load_hardening_args():
+    # Loaded by path: tests/ is not on sys.path.
+    spec = importlib.util.spec_from_file_location("run_args", RUN_ARGS)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.hardening_args
+
+
+hardening_args = load_hardening_args()
 
 
 if __name__ == "__main__":

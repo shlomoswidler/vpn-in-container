@@ -553,6 +553,11 @@ vpn-in-container/
   - `no-new-privileges`: no setuid, setgid or file-capability binary can raise a process's
     privileges. The images' init starts as root and drops to its user with syscalls,
     which this does not affect.
+  - Capabilities: each service drops all of them and adds back only what its image needs: Gluetun
+    `NET_ADMIN`, `NET_RAW`, `CHOWN`, `DAC_OVERRIDE`; Firefox `CHOWN`, `DAC_OVERRIDE`, `FOWNER`,
+    `SETUID`, `SETGID`, `KILL`, `NET_BIND_SERVICE`; qBittorrent `CHOWN`, `DAC_OVERRIDE`,
+    `SETUID`, `SETGID`, `KILL`; qSticky and the socket proxy none. The comments in
+    `docker-compose.yml` say what breaks without each.
 - Only `autoheal-proxy` mounts the Docker socket. The `:ro` on that mount does not limit the
   API (a read-only mount does not stop connecting to a socket, and every API call, writes
   included, goes over that connection); the proxy's allowlist does. Autoheal

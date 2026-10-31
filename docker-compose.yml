@@ -8,8 +8,20 @@ services:
     # Pinned by tag and digest; upgrade deliberately and run tests/stack/run.sh.
     image: qmcgaw/gluetun:v3.41.3@sha256:fa19cc76b2af13d57a8d3dc3066f2ada061b1c761b8aecf989b3877c0486e027
     container_name: gluetun-vpn
+    # Every capability is dropped, and each service adds back only what its image was
+    # measured to need (tests/test_compose.py lists the sets; each one missing breaks
+    # something, as noted). Gluetun runs as root:
+    cap_drop:
+      - ALL
     cap_add:
+      # Routes, firewall rules (iptables over nftables) and the WireGuard interface
       - NET_ADMIN
+      # The ICMP health check's raw socket; without it Gluetun falls back to DNS checks for good
+      - NET_RAW
+      # /tmp/gluetun/forwarded_port, which Gluetun creates for PUID in a directory it makes
+      # with mode 0644 (no search bit): without these, no port is forwarded
+      - CHOWN
+      - DAC_OVERRIDE
     # No setuid, setgid or file-capability binary can raise a process's privileges. Each
     # image's init starts as root and drops to its user with syscalls, which this allows.
     security_opt:
@@ -132,10 +144,28 @@ services:
       # the image's shutdown script sends it)
       - ./config/firefox-profile/customKeys.json:/config/profile/customKeys.json:ro
     shm_size: "2gb"
-    # See vpn. The web server (nginx) loses its file capability, cap_net_bind_service, which
-    # only matters below port 1024: Docker sets net.ipv4.ip_unprivileged_port_start=0.
+    # See vpn. The init runs as root, creates the app user and hands it /config, then
+    # starts each service as that user.
+    cap_drop:
+      - ALL
+    cap_add:
+      # chown of /etc/shadow, /config and the runtime directories (the init stops without it)
+      - CHOWN
+      # Root writing into the app user's files and directories (prefs.js, /tmp, /run/openbox)
+      - DAC_OVERRIDE
+      # chmod of /config/var/tmp, which the app user owns after the first start
+      - FOWNER
+      # Starting each service as the app user
+      - SETUID
+      - SETGID
+      # The supervisor checks and stops the app user's processes with signals
+      - KILL
+      # nginx carries this as a file capability, and the kernel refuses to run it unless the
+      # capability is allowed. no-new-privileges keeps nginx from gaining it (the web UI is on
+      # 5800, and Docker sets net.ipv4.ip_unprivileged_port_start=0).
+      - NET_BIND_SERVICE
     security_opt:
-      - no-new-privileges:true
+      - no-new-privileges:true  # see vpn
     labels:
       # Opt-in marker for this project's autoheal instance (see autoheal service).
       # Scopes autoheal to these siblings only, never other stacks on this host.
@@ -173,6 +203,21 @@ services:
       - "PGID=${PGID:?Set PGID in .env (run: id -g)}"
       - TZ=${TZ:-America/New_York}
       - WEBUI_PORT=9080
+    # See vpn. s6 runs as root, sets up the abc user (PUID), and runs qBittorrent as abc.
+    cap_drop:
+      - ALL
+    cap_add:
+      # lsiown of /config and /downloads (without it qBittorrent cannot write /config)
+      - CHOWN
+      # Root writing the abc user's files: the image's init and
+      # config/qbittorrent-init.d (qBittorrent.conf)
+      - DAC_OVERRIDE
+      # s6-setuidgid abc
+      - SETUID
+      - SETGID
+      # s6 passing SIGTERM on to qBittorrent: without it Docker kills qBittorrent at the stop
+      # timeout, before it saves its resume data
+      - KILL
     security_opt:
       - no-new-privileges:true  # see vpn
     volumes:
@@ -236,6 +281,9 @@ services:
       # Check interval
       - CHECK_INTERVAL=30
       - LOG_LEVEL=INFO
+    # See vpn. Runs as root and writes only root's files (/app/health): needs no capability.
+    cap_drop:
+      - ALL
     security_opt:
       - no-new-privileges:true  # see vpn
     labels:

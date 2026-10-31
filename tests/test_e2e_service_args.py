@@ -65,6 +65,11 @@ class ServiceArgsTests(unittest.TestCase):
             ["/r/cursors:/usr/share/icons/x:ro", "/r/init.sh:/etc/cont-init.d/57.sh:ro"],
         )
 
+    def test_capabilities_pass_through(self):
+        args = self.args(cap_drop=["ALL"], cap_add=["CHOWN", "KILL"])
+        self.assertEqual(option_values(args, "--cap-drop"), ["ALL"])
+        self.assertEqual(option_values(args, "--cap-add"), ["CHOWN", "KILL"])
+
     def test_security_options_pass_through(self):
         args = self.args(security_opt=["no-new-privileges:true", "label=disable"])
         self.assertEqual(
