@@ -21,6 +21,8 @@
 #     with qSticky's valid key refuses (read-only) routes outside its role
 #   - qBittorrent's WebUI, API and settings, and the .torrent watch-folder
 #     hand-off (a private, tracker-less test torrent: no network contact)
+#   - qBittorrent's Host-header check (the DNS rebinding defense) refuses any
+#     name but localhost and 127.0.0.1, and its clients' URLs still work
 #   - the Firefox web UI, private browsing and the single window
 #   - Autoheal restarts an unhealthy container labeled autoheal=true and leaves
 #     an unlabeled one alone
@@ -782,9 +784,54 @@ if [[ "$version" =~ ^v[0-9]+\. ]]; then
 else
     fail "WebUI API at $QBT_URL: '$version'"
 fi
+# Host-header validation, the defense against DNS rebinding (a web page that
+# re-points its own name to this computer): qBittorrent must refuse any Host
+# name but the ones its clients use. Those are the browser on this computer
+# (localhost or 127.0.0.1) and, inside the VPN's network, qSticky and Firefox's
+# Torrent Control (localhost). Prints the HTTP status of GET app/version, from
+# this computer or from inside the VPN's network: qbt_status host|namespace URL [HOST]
+qbt_status() {
+    local headers=()
+    [[ -n "${3:-}" ]] && headers=(-H "Host: $3")
+    if [[ "$1" == host ]]; then
+        curl -s -o /dev/null -w '%{http_code}' --max-time 10 ${headers[@]+"${headers[@]}"} \
+            "$2/api/v2/app/version" 2>/dev/null || true
+    else
+        docker exec "$QBT" curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+            ${headers[@]+"${headers[@]}"} "$2/api/v2/app/version" 2>/dev/null || true
+    fi
+}
+for case in "host $QBT_URL" "host http://127.0.0.1:9080" "namespace http://localhost:9080"; do
+    read -r where url <<<"$case"
+    code=$(qbt_status "$where" "$url")
+    if [[ "$code" == 200 ]]; then
+        pass "WebUI accepts its own name: $url from the $where (200)"
+    else
+        fail "WebUI refused $url from the $where: HTTP $code (want 200)"
+    fi
+done
+rebind_name="rebind-$TEST_ID.example"
+for case in "host $rebind_name:9080" "host $rebind_name" "namespace $rebind_name:9080"; do
+    read -r where host_header <<<"$case"
+    url=$QBT_URL
+    [[ "$where" == namespace ]] && url=http://localhost:9080
+    code=$(qbt_status "$where" "$url" "$host_header")
+    # qBittorrent logs each refused Host header: proof the 401 is that check.
+    logged=$(curl -s --max-time 10 "$QBT_URL/api/v2/log/main?normal=false&info=false&critical=false" |
+        SUFFIX="Received Host header: '$host_header'" python3 -I -c '
+import json, os, sys
+print("yes" if any(m["message"].startswith("WebUI: Invalid Host header. Request source IP: ")
+                   and m["message"].endswith(os.environ["SUFFIX"])
+                   for m in json.load(sys.stdin)) else "no")' 2>/dev/null || echo no)
+    if [[ "$code" == 401 && "$logged" == yes ]]; then
+        pass "WebUI refuses Host: $host_header from the $where (401, logged as an invalid Host header)"
+    else
+        fail "WebUI answered Host: $host_header from the $where with HTTP $code (want 401); logged as invalid: $logged"
+    fi
+done
 settings=$(qbt_preferences | python3 -I "$STACK_DIR/qbt_settings.py" 2>&1 || true)
 if [[ -z "$settings" ]]; then
-    pass "download paths, /watch folder and UPnP off as the init script sets them"
+    pass "download paths, /watch folder, UPnP off and the WebUI host names as the init script sets them"
 else
     fail "qBittorrent settings: $settings"
 fi

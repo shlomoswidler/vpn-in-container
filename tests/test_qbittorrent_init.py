@@ -17,7 +17,11 @@ SCRIPT = REPO_ROOT / "config" / "qbittorrent-init.d" / "10-configure-qbittorrent
 
 WEBUI = {
     "Address": "*",
-    "ServerDomains": "*",
+    # Host-header validation: only the names the clients use (DNS rebinding defense).
+    "HostHeaderValidation": "true",
+    # Quoted: in Qt's INI format an unquoted ";" starts a comment, so qBittorrent would
+    # read just "localhost" (Qt quotes such values itself when it writes them).
+    "ServerDomains": '"localhost;127.0.0.1"',
     "AuthSubnetWhitelist": "192.168.0.0/16, 172.16.0.0/12, 10.0.0.0/8",
     "AuthSubnetWhitelistEnabled": "true",
     "LocalHostAuth": "false",

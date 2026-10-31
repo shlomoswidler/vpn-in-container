@@ -113,6 +113,7 @@ Open qBittorrent at `http://localhost:9080` - **no login required** from your ho
 
 All settings are automatically configured by the init script:
 - WebUI authentication bypassed for private networks
+- WebUI accepts only the host names `localhost` and `127.0.0.1` (blocks DNS rebinding)
 - UPnP/NAT-PMP disabled (qSticky manages port forwarding)
 - Download paths set to `/downloads` and `/downloads/incomplete`
 - Watch folder enabled at `/watch` for auto-importing .torrent files
@@ -164,7 +165,7 @@ The Torrent Control extension is pre-installed. Configure it once to enable one-
 2. Click **Options/Settings**
 3. Configure:
    - **Server Type**: qBittorrent
-   - **Server URL**: `http://localhost:9080`
+   - **Server URL**: `http://localhost:9080` (qBittorrent refuses other host names)
    - **Username/Password**: Leave empty (auth bypassed within container network)
 
 Now clicking any magnet link will automatically add it to qBittorrent.
@@ -418,6 +419,7 @@ docker compose down && docker compose up -d
 3. Try using `localhost` instead of `127.0.0.1`
 4. Use this computer: the ports are bound to 127.0.0.1, so other devices, and this computer's LAN IP
    or `.local` name, cannot reach them by design (see [Security Notes](#security-notes))
+5. qBittorrent answers "Unauthorized" when opened by a name other than `localhost` or `127.0.0.1`
 
 ## File Structure
 
@@ -480,6 +482,10 @@ vpn-in-container/
 - Firefox has no password (anyone who can reach port 5800 controls the browser)
 - qBittorrent WebUI bypasses authentication for private networks (192.168.x.x, 172.16.x.x, 10.x.x.x) and localhost.
   Connections through the published port arrive from Docker's bridge gateway, a private address.
+- qBittorrent accepts only the host names `localhost` and `127.0.0.1` (`ServerDomains`, set by the
+  init script). That stops DNS rebinding, where a web page in any browser on this computer points
+  its own name at 127.0.0.1 to call the API. Opening the WebUI by any other name gives
+  "Unauthorized".
 - All traffic is blocked if VPN disconnects (kill switch)
 - DNS queries go through the VPN (DNS-over-TLS)
 - Autoheal has read-only access to the Docker socket for health monitoring
