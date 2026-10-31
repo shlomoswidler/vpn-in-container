@@ -527,6 +527,13 @@ vpn-in-container/
 - Firefox has no password (anyone who can reach port 5800 controls the browser)
 - qBittorrent WebUI bypasses authentication for private networks (192.168.x.x, 172.16.x.x, 10.x.x.x) and localhost.
   Connections through the published port arrive from Docker's bridge gateway, a private address.
+- qBittorrent's own password is never set by this stack. Since 4.6.1 it has no default: until you
+  set one (Options → WebUI), each start prints a temporary password in `docker compose logs
+  qbittorrent`, which you need only from an address outside the bypass. `QBITTORRENT_PASS` in
+  `.env` is optional and does not change it: it is only what qSticky sends when it logs in, and
+  over loopback qBittorrent does not check it. Set it to the WebUI password only if you turn on
+  authentication for localhost (`LocalHostAuth`); a wrong value then fails every 30 seconds, and
+  qBittorrent bans 127.0.0.1 for an hour after 5 failures.
 - qBittorrent accepts only the host names `localhost` and `127.0.0.1` (`ServerDomains`, set by the
   init script). That stops DNS rebinding, where a web page in any browser on this computer points
   its own name at 127.0.0.1 to call the API. Opening the WebUI by any other name gives

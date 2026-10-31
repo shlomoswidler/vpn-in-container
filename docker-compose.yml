@@ -203,8 +203,14 @@ services:
       # qBittorrent connection (localhost since we share VPN network)
       - QBITTORRENT_HOST=localhost
       - QBITTORRENT_PORT=9080
+      # qSticky always logs in, but over loopback qBittorrent answers without checking the
+      # credentials (LocalHostAuth=false, set by the init script), so these only matter if
+      # that is turned off. Then QBITTORRENT_PASS in .env must be the WebUI password: each
+      # wrong login counts, and qBittorrent bans 127.0.0.1 for an hour after 5. Nothing sets
+      # qBittorrent's password from it. Empty when unset (adminadmin, qSticky's own default,
+      # has not been qBittorrent's since 4.6.1).
       - QBITTORRENT_USER=admin
-      - QBITTORRENT_PASS=${QBITTORRENT_PASS:-adminadmin}
+      - QBITTORRENT_PASS=${QBITTORRENT_PASS:-}
       - QBITTORRENT_HTTPS=false
       # Gluetun connection (localhost since we share VPN network)
       - GLUETUN_HOST=localhost
