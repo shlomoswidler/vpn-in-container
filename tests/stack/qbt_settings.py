@@ -2,8 +2,8 @@
 """Check qBittorrent preferences (JSON on stdin) against what the stack expects.
 
 The expected values are what config/qbittorrent-init.d/10-configure-qbittorrent.sh
-sets, plus the /watch folder for the .torrent hand-off from Firefox. Prints one
-line describing every mismatch, or nothing when all match.
+sets, the /watch folder for the .torrent hand-off from Firefox included. Prints
+one line describing every mismatch, or nothing when all match.
 """
 
 import json

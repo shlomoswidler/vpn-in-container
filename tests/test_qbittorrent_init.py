@@ -5,7 +5,9 @@ before qBittorrent 5.3 (WebUI keys under [Preferences]) and from 5.3 on (their
 own [WebUI] section). Run: python3 -m unittest discover -s tests
 """
 
+import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -14,6 +16,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "config" / "qbittorrent-init.d" / "10-configure-qbittorrent.sh"
+BASH = shutil.which("bash") or "bash"
 
 WEBUI = {
     "Address": "*",
@@ -32,6 +35,21 @@ BITTORRENT = {
     "Session\\TempPathEnabled": "true",
     "Session\\AddTorrentStopped": "false",
     "Session\\ShareLimitAction": "Stop",
+}
+
+# The watched folder for the .torrent hand-off from Firefox: torrents dropped in /watch
+# are added and saved to /downloads/, not by category (automatic torrent management off).
+WATCH_ENTRY = {
+    "add_torrent_params": {"save_path": "/downloads/", "use_auto_tmm": False},
+    "recursive": False,
+}
+# Watched folders a user added in the WebUI, as qBittorrent 5.3 writes them.
+OTHER_FOLDERS = {
+    "/downloads/other-watch": {
+        "add_torrent_params": {"category": "linux", "save_path": "", "use_auto_tmm": True},
+        "recursive": True,
+    },
+    "/config/more": {"add_torrent_params": {}, "recursive": False},
 }
 
 PRE_53 = """\
@@ -157,6 +175,121 @@ class InitScriptTests(unittest.TestCase):
         conf = FROM_53.replace("LocalHostAuth=true\n", "LocalHostAuth=true\nLocalHostAuth=true\n")
         sections = self.run_script(conf)
         self.assert_section(sections, "WebUI", {"LocalHostAuth": "false"})
+
+
+class WatchedFolderTests(unittest.TestCase):
+    """The script makes /watch a watched folder in watched_folders.json, next to
+    qBittorrent.conf, and keeps any other watched folder the user added."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.conf = self.dir / "qBittorrent.conf"
+        self.conf.write_text(FROM_53)
+        self.watch_file = self.dir / "watched_folders.json"
+
+    def run_script(self, path: str | None = None) -> subprocess.CompletedProcess:
+        env = {**os.environ, "QBT_CONF_FILE": str(self.conf)}
+        if path is not None:
+            env["PATH"] = path
+        # bash by its full path: the PATH given may not contain it.
+        return subprocess.run(
+            [BASH, str(SCRIPT)], env=env, capture_output=True, text=True, timeout=60,
+            check=False,
+        )  # fmt: skip
+
+    def watched(self) -> dict:
+        return json.loads(self.watch_file.read_text())
+
+    def assert_configured_rest(self) -> None:
+        # A problem with the watched folders must not stop the other settings.
+        sections = parse(self.conf.read_text())
+        self.assertEqual([v for k, v in sections["WebUI"] if k == "LocalHostAuth"], ["false"])
+        self.assertEqual(
+            [v for k, v in sections["BitTorrent"] if k == "Session\\DefaultSavePath"],
+            ["/downloads/"],
+        )
+
+    def test_creates_the_file_when_missing(self):
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(self.watched(), {"/watch": WATCH_ENTRY})
+        self.assertIn("[qbt-init] Adding /watch to the watched folders\n", result.stdout)
+        self.assert_configured_rest()
+
+    def test_treats_an_empty_file_as_no_watched_folders(self):
+        for content in ("", "\n", "{}"):
+            with self.subTest(content=content):
+                self.watch_file.write_text(content)
+                result = self.run_script()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.watched(), {"/watch": WATCH_ENTRY})
+
+    def test_adds_watch_and_keeps_the_other_folders(self):
+        self.watch_file.write_text(json.dumps(OTHER_FOLDERS, indent=4))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.watched(), {**OTHER_FOLDERS, "/watch": WATCH_ENTRY})
+        # Existing entries keep their order; /watch is added after them.
+        self.assertEqual(list(self.watched()), [*OTHER_FOLDERS, "/watch"])
+
+    def test_leaves_a_file_that_already_watches_watch_untouched(self):
+        # The user may have changed /watch's options in the WebUI: keep them.
+        custom = {"/watch": {**WATCH_ENTRY, "recursive": True}, **OTHER_FOLDERS}
+        for key in ("/watch", "/watch/"):
+            with self.subTest(key=key):
+                text = json.dumps({key: custom["/watch"], **OTHER_FOLDERS}, indent=4)
+                self.watch_file.write_text(text)
+                result = self.run_script()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.watch_file.read_text(), text, "file was rewritten")
+                self.assertIn("[qbt-init] /watch is already a watched folder\n", result.stdout)
+
+    def test_is_idempotent(self):
+        self.watch_file.write_text(json.dumps(OTHER_FOLDERS))
+        self.assertEqual(self.run_script().returncode, 0)
+        once = self.watch_file.read_text()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.watch_file.read_text(), once)
+        self.assertIn("[qbt-init] /watch is already a watched folder\n", result.stdout)
+
+    def test_keeps_the_mode_of_an_existing_file(self):
+        self.watch_file.write_text("{}")
+        self.watch_file.chmod(0o640)
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertEqual(self.watch_file.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(self.watched(), {"/watch": WATCH_ENTRY})
+
+    def test_leaves_an_unreadable_file_alone_and_says_so(self):
+        for content in ("{not json", "[]", '"/watch"', '{"/other": 1} trailing'):
+            with self.subTest(content=content):
+                self.watch_file.write_text(content)
+                result = self.run_script()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.watch_file.read_text(), content, "file was changed")
+                self.assertIn(
+                    f"[qbt-init] {self.watch_file} is not a JSON object; "
+                    "not adding /watch (fix or delete the file)\n",
+                    result.stderr,
+                )
+                self.assert_configured_rest()
+
+    def test_reports_a_missing_jq(self):
+        # A PATH with every tool the script uses except jq.
+        bin_dir = self.dir / "bin"
+        bin_dir.mkdir()
+        for tool in ("awk", "cat", "chmod", "cp", "dirname", "grep", "mktemp", "rm", "sleep"):
+            found = shutil.which(tool)
+            self.assertIsNotNone(found, tool)
+            (bin_dir / tool).symlink_to(found)
+        result = self.run_script(path=str(bin_dir))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.watch_file.exists())
+        self.assertIn("[qbt-init] jq not found; not adding /watch\n", result.stderr)
+        self.assert_configured_rest()
 
 
 class MissingConfigTests(unittest.TestCase):

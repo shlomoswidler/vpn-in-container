@@ -93,4 +93,58 @@ echo "[qbt-init] Configuring torrent behavior..."
 set_config "BitTorrent" 'Session\AddTorrentStopped' "false"
 set_config "BitTorrent" 'Session\ShareLimitAction' "Stop"
 
+# The .torrent hand-off from Firefox: qBittorrent adds every .torrent file that
+# appears in /watch (Firefox's download folder, see docker-compose.yml) and
+# saves it to /downloads/, not by category (automatic torrent management off).
+# qBittorrent keeps its watched folders in watched_folders.json next to
+# qBittorrent.conf and reads them at start. This adds /watch to the folders
+# already there and leaves the others alone, and leaves /watch alone once it is
+# there, so options changed in the WebUI stay.
+WATCH_DIR=/watch
+WATCH_FILE="$(dirname "$CONF_FILE")/watched_folders.json"
+WATCH_ENTRY='{"add_torrent_params": {"save_path": "/downloads/", "use_auto_tmm": false}, "recursive": false}'
+
+configure_watch_folder() {
+    local current created="" tmp
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "[qbt-init] jq not found; not adding $WATCH_DIR" >&2
+        return
+    fi
+    # The file's watched folders: one JSON object, or none at all for a missing
+    # or empty file. Anything else is left for the user to fix.
+    if [[ -e "$WATCH_FILE" ]]; then
+        if ! current=$(jq -s 'if length == 0 then {}
+                elif length == 1 and (.[0] | type) == "object" then .[0]
+                else error("not one JSON object") end' "$WATCH_FILE" 2>/dev/null); then
+            echo "[qbt-init] $WATCH_FILE is not a JSON object; not adding $WATCH_DIR (fix or delete the file)" >&2
+            return
+        fi
+    else
+        current="{}"
+        created=yes
+    fi
+    # qBittorrent drops a trailing slash from a watched folder's path.
+    if jq -e --arg dir "$WATCH_DIR" 'any(keys[]; rtrimstr("/") == $dir)' <<<"$current" >/dev/null; then
+        echo "[qbt-init] $WATCH_DIR is already a watched folder"
+        return
+    fi
+    echo "[qbt-init] Adding $WATCH_DIR to the watched folders"
+    tmp=$(mktemp)
+    if jq --arg dir "$WATCH_DIR" --argjson entry "$WATCH_ENTRY" '. + {($dir): $entry}' \
+        <<<"$current" > "$tmp"; then
+        # Rewritten in place, so an existing file keeps its owner and mode.
+        cat "$tmp" > "$WATCH_FILE"
+        # This script runs as root, after the image has given everything in
+        # /config to the user qBittorrent runs as: give the new file the same
+        # owner, like the rest of /config.
+        if [[ -n "$created" && "$EUID" -eq 0 ]]; then
+            chown --reference="$CONF_FILE" "$WATCH_FILE"
+        fi
+    fi
+    rm -f "$tmp"
+}
+
+echo "[qbt-init] Configuring the watch folder..."
+configure_watch_folder
+
 echo "[qbt-init] Configuration complete"

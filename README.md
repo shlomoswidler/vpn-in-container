@@ -118,7 +118,9 @@ All settings are automatically configured by the init script:
 - WebUI accepts only the host names `localhost` and `127.0.0.1` (blocks DNS rebinding)
 - UPnP/NAT-PMP disabled (qSticky manages port forwarding)
 - Download paths set to `/downloads` and `/downloads/incomplete`
-- Watch folder enabled at `/watch` for auto-importing .torrent files
+- Watch folder `/watch` (Firefox's download folder) added to `watched_folders.json`, saving to
+  `/downloads`, so .torrent files downloaded in Firefox are imported. The script adds it only if
+  it is missing: watched folders you add, and options you change for `/watch`, are kept
 
 ## Start and Stop
 
@@ -280,6 +282,8 @@ tests/browser/run.sh   # the patched noVNC in headless Chrome and Firefox
 tests/stack/recovery.sh        # DISRUPTIVE: restarts the VPN container and times the recovery
 tests/qbittorrent/download.sh  # a real multi-file download between two throwaway qBittorrent
                                # containers (no internet), checked by SHA-256 and recheck
+tests/qbittorrent/fresh-install.sh  # the init script on an empty /config (no network): its
+                                    # settings and the /watch hand-off, as on a new clone
 node --test tests/ && python3 -m unittest discover -s tests   # unit tests
 ```
 
@@ -419,7 +423,9 @@ docker compose down && docker compose up -d
 ### Watch Folder Not Working
 
 1. Verify Firefox download location is `/config/downloads`
-2. Check qBittorrent watch folder is `/watch`
+2. Check qBittorrent watch folder is `/watch` (Options → Downloads → Monitored folders). The init
+   script adds it at every start if `config/qbittorrent/qBittorrent/watched_folders.json` lacks
+   it, and leaves the file alone if it is not valid JSON (see `docker compose logs qbittorrent`)
 3. Verify `~/Downloads/vpn-in-container/downloads` exists and has correct permissions
 
 ### Can't Access Web UIs
@@ -476,6 +482,7 @@ vpn-in-container/
 │   ├── e2e/run.sh          # Real Firefox + VNC server cursor test (Docker)
 │   ├── stack/run.sh        # Running stack: VPN, kill switch, ports, qBittorrent, Autoheal
 │   ├── qbittorrent/download.sh  # Isolated real download test for the qBittorrent image
+│   ├── qbittorrent/fresh-install.sh  # The init script on an empty /config (watch folder)
 │   └── browser/run.sh      # Patched noVNC in headless Chrome and Firefox
 
 ~/Downloads/vpn-in-container/           # Host downloads directory
