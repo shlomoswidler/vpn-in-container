@@ -2,7 +2,9 @@
 # End-to-end test of the running stack (docker compose up -d first).
 #
 # Checks real behavior, not just container status:
-#   - every service runs the image docker-compose.yml pins, and is healthy
+#   - every service runs the image docker-compose.yml pins, and is healthy;
+#     Autoheal's image, built here, has the labels of the commit and base image
+#     docker-compose.yml builds it from
 #   - the web UIs are published on 127.0.0.1 only: they answer at localhost,
 #     but not at this computer's LAN address or any other address it has
 #   - traffic from all three VPN-routed containers leaves through the VPN
@@ -28,7 +30,8 @@
 #     containers and restart one, and refuses everything else (create, inspect,
 #     exec, stop)
 #   - Autoheal restarts an unhealthy container labeled autoheal=true and leaves
-#     an unlabeled one alone
+#     an unlabeled one alone; its restart call waits for a restart that takes
+#     the whole stop timeout (the proxy logs 204, and Autoheal logs no failure)
 #
 # It changes nothing permanently: the listening port is restored by qSticky
 # (or by this script), and the test torrent and test containers are removed.
@@ -88,7 +91,8 @@ trap cleanup EXIT
 docker compose -f "$REPO/docker-compose.yml" config --format json > "$WORK/config.json"
 
 # Prints a value from the resolved compose config: compose_value SERVICE KEY
-# where KEY is "container", "image", "env:<NAME>" or "mount:<target>". Prints
+# where KEY is "container", "image", "env:<NAME>", "mount:<target>" or
+# "build-label:<NAME>" (a label of the image the service builds). Prints
 # nothing for a service the file lacks (the checks on it then fail).
 compose_value() {
     python3 -I - "$WORK/config.json" "$1" "$2" <<'EOF'
@@ -103,6 +107,8 @@ elif key.startswith("env:"):
     print(svc.get("environment", {}).get(key[4:], ""))
 elif key.startswith("mount:"):
     print(next(v["source"] for v in svc.get("volumes", []) if v["target"] == key[6:]))
+elif key.startswith("build-label:"):
+    print(svc.get("build", {}).get("labels", {}).get(key[12:], ""))
 EOF
 }
 
@@ -236,8 +242,23 @@ for service in vpn qbittorrent qsticky firefox autoheal autoheal-proxy; do
         fail "$service runs $running, docker-compose.yml pins $pinned"
     fi
 done
+# Autoheal's image is built here, so its name is only a local tag: an image
+# built earlier from other inputs under the same name would pass the check
+# above. Its labels record the commit and base image it was built from.
+autoheal_image=$(docker inspect -f '{{.Image}}' "${AUTOHEAL:-none}" 2>/dev/null) || autoheal_image=""
+for label in org.opencontainers.image.revision org.opencontainers.image.base.digest; do
+    want=$(compose_value autoheal "build-label:$label")
+    have=$(docker image inspect -f "{{index .Config.Labels \"$label\"}}" \
+        "${autoheal_image:-none}" 2>/dev/null) || have=""
+    if [[ -n "$want" && "$have" == "$want" ]]; then
+        pass "autoheal's image has $label=$want"
+    else
+        fail "autoheal's image has $label='$have', docker-compose.yml builds it with '$want'"
+    fi
+done
 deadline=$((SECONDS + HEALTH_TIMEOUT))
-for container in "$VPN" "$QBT" "$QSTICKY" "$FIREFOX" "${PROXY:-autoheal-proxy}"; do
+for container in "$VPN" "$QBT" "$QSTICKY" "$FIREFOX" "${AUTOHEAL:-autoheal}" \
+    "${PROXY:-autoheal-proxy}"; do
     status=""
     while ((SECONDS < deadline)); do
         status=$(docker inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null) ||
@@ -251,11 +272,6 @@ for container in "$VPN" "$QBT" "$QSTICKY" "$FIREFOX" "${PROXY:-autoheal-proxy}";
         fail "$container is $status after waiting up to ${HEALTH_TIMEOUT}s"
     fi
 done
-if [[ "$(docker inspect -f '{{.State.Running}}' "$AUTOHEAL" 2>/dev/null)" == true ]]; then
-    pass "$AUTOHEAL is running"
-else
-    fail "$AUTOHEAL is not running"
-fi
 
 echo "== published ports (loopback only)"
 # The web UIs have no password, so only this computer may reach them: every
@@ -1011,6 +1027,33 @@ if [[ "$(docker inspect -f '{{.State.StartedAt}}' "$TEST_ID-unlabeled")" == "$un
     pass "left an unhealthy unlabeled container alone"
 else
     fail "unlabeled test container was restarted or not unhealthy ($unlabeled_health)"
+fi
+# The labeled container ignores SIGTERM (sleep is its PID 1), so its restart
+# takes the whole stop timeout. Autoheal's curl must wait for the answer
+# (CURL_TIMEOUT): when it gave up first, Autoheal logged "Restarting container
+# ... failed" although the restart went through. The proxy logs each request
+# when it ends, with Docker's status, or with 400 and termination state CH--
+# when the client closed the connection first.
+labeled_id=$(docker inspect -f '{{.Id}}' "$TEST_ID-labeled")
+restart_line=""
+wait_until=$((SECONDS + 30))
+while ((SECONDS < wait_until)); do
+    proxy_log=$(docker logs --since 15m "${PROXY:-autoheal-proxy}" 2>&1) || proxy_log=""
+    restart_line=$(grep -m 1 "POST /containers/$labeled_id/restart" <<<"$proxy_log") || true
+    [[ -n "$restart_line" ]] && break
+    sleep 2
+done
+if [[ "$restart_line" =~ \ 204\ [0-9]+\ -\ -\ ----\  ]]; then
+    pass "Autoheal's restart call waited for the restart to finish (the proxy logged 204)"
+else
+    fail "Autoheal's restart call (want 204 and ---- in the proxy's log): ${restart_line:-no log line}"
+fi
+autoheal_log=$(docker logs --since 15m "$AUTOHEAL" 2>&1) || autoheal_log=""
+failed_line=$(grep -m 1 "Restarting container ${labeled_id:0:12} failed" <<<"$autoheal_log") || true
+if [[ -n "$restart_line" && -z "$failed_line" ]]; then
+    pass "Autoheal did not log the restart as failed"
+else
+    fail "Autoheal logged: ${failed_line:-no restart call in the proxy log}"
 fi
 
 if ((failures > 0)); then
