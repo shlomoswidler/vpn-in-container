@@ -29,8 +29,13 @@
 # After each, it checks the window's tabs (single-window-page.html titles each
 # page uniquely).
 #
+# Scenarios 1-9 run with permanent private browsing on (FIREFOX_PRIVATE_BROWSING=true,
+# whatever .env sets), scenario 10 with it off (false, the default).
+#
 # Scenario 6 checks that Firefox's "Private browsing" indicator shows in the tab
-# strip (userChrome.css shows it when permanent private browsing is on).
+# strip (userChrome.css shows it when permanent private browsing is on), and
+# that nothing is kept: a cookie and the history of a page are gone after the
+# container restarts on the same /config.
 #
 # Scenario 7 checks the Firefox half of the .torrent handoff to qBittorrent: a
 # .torrent link downloads, without a prompt, into the directory the firefox
@@ -51,6 +56,15 @@
 # rate in whole samples (ws_audio_probe.py), with silence before the click and
 # after the tone stops.
 #
+# Scenario 10 checks private browsing off: the indicator is not shown, the
+# cookie and history are kept across a restart on the same /config, Firefox
+# still stays one window (a private window, which can't share it, is closed),
+# and a .torrent link still downloads into /config/downloads.
+#
+# Scenario 11 checks that a FIREFOX_PRIVATE_BROWSING other than true or false
+# stops the container at start, with the reason in its log, before the image
+# writes the value into prefs.js.
+#
 # Usage: tests/e2e/run.sh   (needs docker, python3 and node on the host)
 
 set -euo pipefail
@@ -64,8 +78,8 @@ PROBE_IMAGE=python:3.13.18-alpine3.24@sha256:7984cf56ceaddebe4fefeb75d64000b9f45
 WORK=$(mktemp -d)
 
 cleanup() {
-    docker rm -f "$CONTAINER-web" "$CONTAINER-stun" "$CONTAINER-novnc" "$CONTAINER" \
-        >/dev/null 2>&1 || true
+    docker rm -f "$CONTAINER-web" "$CONTAINER-stun" "$CONTAINER-novnc" "$CONTAINER-bad" \
+        "$CONTAINER" >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -87,14 +101,35 @@ CELL_W=320
 CELL_H=135
 COLUMNS=6
 
-docker compose -f "$REPO/docker-compose.yml" config --format json > "$WORK/compose.json"
-python3 -I "$E2E_DIR/service_args.py" < "$WORK/compose.json" > "$WORK/service-args"
+# The firefox service with FIREFOX_PRIVATE_BROWSING set to VALUE (the shell's
+# value wins over .env's), as `docker compose config --format json` gives it,
+# in $WORK/compose-VALUE.json, and as the image (first line) and `docker run`
+# arguments (one per line) in $WORK/service-args-VALUE.
+service_config() {
+    FIREFOX_PRIVATE_BROWSING=$1 docker compose -f "$REPO/docker-compose.yml" config \
+        --format json >"$WORK/compose-$1.json"
+    python3 -I "$E2E_DIR/service_args.py" <"$WORK/compose-$1.json" >"$WORK/service-args-$1"
+}
+service_config true
+service_config false
+service_config yes
+cp "$WORK/compose-true.json" "$WORK/compose.json"
 
-IMAGE=$(head -n 1 "$WORK/service-args")
+IMAGE=$(head -n 1 "$WORK/service-args-true")
 SERVICE_ARGS=()
 while IFS= read -r arg; do
     SERVICE_ARGS+=("$arg")
-done < <(tail -n +2 "$WORK/service-args")
+done < <(tail -n +2 "$WORK/service-args-true")
+# What start_firefox_windowed and check_prefs use; scenario 10 swaps in OFF_ARGS.
+FIREFOX_ARGS=("${SERVICE_ARGS[@]}")
+OFF_ARGS=()
+while IFS= read -r arg; do
+    OFF_ARGS+=("$arg")
+done < <(tail -n +2 "$WORK/service-args-false")
+BAD_ARGS=()
+while IFS= read -r arg; do
+    BAD_ARGS+=("$arg")
+done < <(tail -n +2 "$WORK/service-args-yes")
 echo "image: $IMAGE"
 # One option per line, with its value if it has one (--read-only has none).
 for ((i = 0; i < ${#SERVICE_ARGS[@]}; i++)); do
@@ -209,13 +244,19 @@ check_cell() {
 # when Firefox rewrites prefs.js it leaves out a user value equal to the
 # default. Such an entry passes if one of Firefox's default pref files sets the
 # same value (it is then in effect either way, and the line comes back at the
-# next start if the default changes).
+# next start if the default changes), or if it is in BUILT_IN_DEFAULTS and
+# prefs.js has no line for the pref at all.
 FIREFOX_DEFAULT_PREFS="/usr/lib/firefox/defaults/pref /usr/lib/firefox/browser/defaults/preferences"
+# Entries equal to a default compiled into Firefox, which no pref file shows.
+# browser.privatebrowsing.autostart is false without a user value (measured on
+# v26.09.1: no private browsing indicator; scenario 10 checks the effect: a
+# cookie and history kept across a restart).
+BUILT_IN_DEFAULTS=" browser.privatebrowsing.autostart=false "
 check_prefs() {
     local i env name value pref_value line default
-    for ((i = 0; i < ${#SERVICE_ARGS[@]}; i++)); do
-        env=${SERVICE_ARGS[$i]}
-        [[ "${SERVICE_ARGS[$((i - 1))]:-}" == "-e" && "$env" == FF_PREF_* ]] || continue
+    for ((i = 0; i < ${#FIREFOX_ARGS[@]}; i++)); do
+        env=${FIREFOX_ARGS[$i]}
+        [[ "${FIREFOX_ARGS[$((i - 1))]:-}" == "-e" && "$env" == FF_PREF_* ]] || continue
         checks=$((checks + 1))
         name=${env%%=*}
         value=${env#*=}
@@ -231,6 +272,9 @@ check_prefs() {
             echo "ok    $name -> $line"
         elif docker exec "$CONTAINER" sh -c "grep -qxF -r -e '$default' $FIREFOX_DEFAULT_PREFS"; then
             echo "ok    $name -> the default is the same: $default"
+        elif [[ "$BUILT_IN_DEFAULTS" == *" $value "* ]] &&
+            ! docker exec "$CONTAINER" grep -qF "user_pref(\"${value%%=*}\"," /config/profile/prefs.js; then
+            echo "ok    $name -> no line, Firefox's built-in default is the same: $value"
         else
             echo "FAIL  $name: prefs.js has no line $line"
             failures=$((failures + 1))
@@ -274,7 +318,7 @@ start_firefox_windowed() {
     shift $(($# < 2 ? $# : 2))
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
     docker run -d --rm --name "$CONTAINER" --network none --shm-size 1g \
-        "${SERVICE_ARGS[@]}" "$@" \
+        "${FIREFOX_ARGS[@]}" "$@" \
         -e "FF_OPEN_URL=file:///e2e/$page" \
         -e FF_PREF_NO_DATA_BAR=datareporting.policy.dataSubmissionPolicyBypassNotification=true \
         -v "$E2E_DIR:/e2e:ro" \
@@ -554,6 +598,21 @@ close_tabs() {
     done
 }
 
+# Asks the running Firefox, as a second `firefox --private-window` would, for a
+# private window showing single-window-page.html#NAME. It stands in for every
+# way to open one (a menu item, a toolbar button, an extension): they all end
+# in the same new window. The command needs Firefox's own environment to reach
+# the running instance (its D-Bus session and runtime directory); it returns
+# once the request is handed over.
+open_private_window() {
+    docker exec -u 1000:1000 -e DISPLAY=:0 -e HOME=/config \
+        -e DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus.base -e XDG_RUNTIME_DIR=/tmp/run/user/app \
+        -e XDG_CONFIG_HOME=/config/xdg/config -e XDG_CACHE_HOME=/config/xdg/cache \
+        -e XDG_DATA_HOME=/config/xdg/data -e XDG_STATE_HOME=/config/xdg/state \
+        "$CONTAINER" timeout 30 /usr/lib/firefox/firefox --profile /config/profile \
+        --private-window "file:///e2e/single-window-page.html#$1" >/dev/null 2>&1
+}
+
 # Firefox is a single window here: dropping a tab outside the tab strip must not
 # un-maximize the window or open a new one, new-window shortcuts must not open
 # one, links and pop-ups that ask for a new window must open as tabs in it
@@ -590,11 +649,14 @@ check_single_window second-tab-torn-off "shift-click main" - \
 # window.open() with a size asks for a 400x300 pop-up window.
 check_single_window popup "shift-click main popup" popup \
     in_x xdotool mousemove "$((DISPLAY_W / 2))" "$popup_y" click 1
+# With private browsing on, every window is private: a private window's tab moves too.
+check_single_window private-window "shift-click main popup private" private \
+    open_private_window private
 # These come last: a failure here closes Firefox and stops the container.
 # Closing the last tab must leave the window open with a new tab: that is
 # browser.tabs.closeWindowWithLastTab=false (FF_PREF_KEEP_WINDOW_WITH_LAST_TAB).
-check_single_window ctrl-shift-w "shift-click main popup" - in_x xdotool key ctrl+shift+w
-check_single_window ctrl-w-every-tab untitled untitled close_tabs main shift-click untitled
+check_single_window ctrl-shift-w "shift-click main popup private" - in_x xdotool key ctrl+shift+w
+check_single_window ctrl-w-every-tab untitled untitled close_tabs popup main shift-click untitled
 
 # Counts the pixels within TOLERANCE of COLOR (RRGGBB) in the screen region
 # X Y W H, read over VNC; prints rfb_color_probe.py's JSON summary.
@@ -604,28 +666,144 @@ count_color() {
         python -I /e2e/rfb_color_probe.py 127.0.0.1 5900 "$@"
 }
 
-# With permanent private browsing on, Firefox's own "Private browsing" indicator
-# (userChrome.css) shows at the end of the tab strip. Its mask icon has a fixed
-# #8000D7 fill; measured on v26.09.1: about 90 such pixels in the 44px strip.
-echo "== scenario 6: the private browsing indicator is shown"
+# Firefox's own "Private browsing" indicator (userChrome.css shows it with
+# permanent private browsing) at the end of the tab strip. Its mask icon has a
+# fixed #8000D7 fill; measured on v26.09.1: about 90 such pixels in the 44px
+# strip, and none with private browsing off. Reads the strip until the icon
+# shows or 15 s pass (it may still be drawing), and sets INDICATOR to the last
+# summary and INDICATOR_PIXELS to its count.
+INDICATOR_MIN=50
+read_indicator() {
+    local deadline=$((SECONDS + 15))
+    while :; do
+        INDICATOR=$(count_color 0 0 "$DISPLAY_W" 44 8000d7 16)
+        INDICATOR_PIXELS=$(sed -n 's/.*"matches": \([0-9]*\).*/\1/p' <<<"$INDICATOR")
+        INDICATOR_PIXELS=${INDICATOR_PIXELS:-0}
+        if ((INDICATOR_PIXELS >= INDICATOR_MIN || SECONDS >= deadline)); then
+            return 0
+        fi
+        sleep 1
+    done
+}
+
+# Serves the files in DIR on 127.0.0.1:WEB_PORT in the test container's network
+# namespace (torrent_server.py; the container still has no network), and waits
+# until it answers.
+WEB_PORT=8765 # download-page.html links to this port
+start_web_server() {
+    local deadline=$((SECONDS + 30))
+    docker rm -f "$CONTAINER-web" >/dev/null 2>&1 || true
+    docker run -d --rm --name "$CONTAINER-web" --network "container:$CONTAINER" \
+        -v "$E2E_DIR:/e2e:ro" -v "$1:/srv:ro" "$PROBE_IMAGE" \
+        python -I /e2e/torrent_server.py "$WEB_PORT" /srv >/dev/null
+    until docker exec "$CONTAINER" wget -q -O /dev/null "http://127.0.0.1:$WEB_PORT/" 2>/dev/null; do
+        if ((SECONDS >= deadline)); then
+            echo "FAIL: torrent_server.py did not start" >&2
+            docker logs "$CONTAINER-web" >&2
+            exit 1
+        fi
+        sleep 0.5
+    done
+}
+
+# Stops the test container as `docker stop` stops the service: the image's
+# shutdown script quits Firefox with Ctrl+Q, so it saves the profile. Waits
+# until Docker has removed it (--rm), so its name is free again.
+stop_firefox() {
+    local deadline=$((SECONDS + 60))
+    docker rm -f "$CONTAINER-web" >/dev/null 2>&1 || true
+    docker stop "$CONTAINER" >/dev/null
+    while docker inspect "$CONTAINER" >/dev/null 2>&1; do
+        if ((SECONDS >= deadline)); then
+            echo "FAIL: $CONTAINER was not removed after it stopped" >&2
+            exit 1
+        fi
+        sleep 0.5
+    done
+}
+
+# Loads URL in the shown tab, typed into the address bar as a person would, and
+# waits up to 15 s for a title that starts with PREFIX; prints that title.
+load_url() {
+    in_x xdotool windowactivate --sync "$WINDOW" key ctrl+l || return 1
+    in_x xdotool type --delay 5 "$1" || return 1
+    in_x xdotool key Return || return 1
+    wait_title "$2"
+}
+
+# Prints how many visits Firefox recorded to cookie-page.html in the history of
+# the profile in DIR (a host directory mounted at /config), read from a copy of
+# places.sqlite after the container stopped; 0 without one.
+cookie_page_visits() {
+    local places=$1/profile/places.sqlite copy=$WORK/places-copy
+    rm -rf "$copy"
+    mkdir "$copy"
+    if [[ ! -f "$places" ]]; then
+        echo 0
+        return 0
+    fi
+    cp "$places" "$copy/"
+    [[ ! -f "$places-wal" ]] || cp "$places-wal" "$copy/"
+    python3 -I -c '
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+print(con.execute(
+    "SELECT COALESCE(SUM(visit_count), 0) FROM moz_places WHERE url LIKE ?",
+    ("%/cookie-page.html",),
+).fetchone()[0])
+' "$copy/places.sqlite"
+}
+
+# check_kept LABEL EXPECTED ACTUAL: ok if ACTUAL is EXPECTED.
+check_kept() {
+    checks=$((checks + 1))
+    if [[ "$3" == "$2" ]]; then
+        printf 'ok    %-22s %s\n' "$1" "$3"
+    else
+        printf 'FAIL  %-22s %s (expected %s)\n' "$1" "${3:-(nothing)}" "$2"
+        failures=$((failures + 1))
+    fi
+}
+
+# check_restart MODE KEPT VISITS: on a fresh /config ($WORK/profile-MODE), loads
+# cookie-page.html, which sets a cookie, restarts the container on the same
+# /config and loads it again. KEPT ("yes" or "no") is whether the cookie must
+# come back, and VISITS ("0" or "1 or more") what history must show after the
+# first run. Further arguments go to start_firefox_windowed. Leaves the second
+# container running.
+check_restart() {
+    local mode=$1 kept=$2 visits=$3 profile=$WORK/profile-$1 title count
+    shift 3
+    mkdir -p "$profile"
+    chmod 0777 "$profile" # the image takes /config over for its user
+    start_firefox_windowed blank-page.html "e2e blank page" -v "$profile:/config" "$@"
+    start_web_server "$E2E_DIR"
+    title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page earlier") || true
+    check_kept "$mode-first-visit" "e2e cookie page earlier-cookie=no" "$title"
+    stop_firefox
+    count=$(cookie_page_visits "$profile")
+    if [[ "$visits" != 0 && "$count" =~ ^[1-9][0-9]*$ ]]; then
+        count="1 or more"
+    fi
+    check_kept "$mode-history" "$visits" "$count"
+    start_firefox_windowed blank-page.html "e2e blank page" -v "$profile:/config" "$@"
+    start_web_server "$E2E_DIR"
+    title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page earlier") || true
+    check_kept "$mode-cookie-restart" "e2e cookie page earlier-cookie=$kept" "$title"
+}
+
+echo "== scenario 6: private browsing on: the indicator is shown, nothing is kept"
 start_firefox_windowed
 checks=$((checks + 1))
-# The tab strip may still be drawing: read it until the icon shows, up to 15 s.
-deadline=$((SECONDS + 15))
-while :; do
-    summary=$(count_color 0 0 "$DISPLAY_W" 44 8000d7 16)
-    matches=$(sed -n 's/.*"matches": \([0-9]*\).*/\1/p' <<<"$summary")
-    if ((${matches:-0} >= 50 || SECONDS >= deadline)); then
-        break
-    fi
-    sleep 1
-done
-if ((${matches:-0} >= 50)); then
-    printf 'ok    %-22s %s\n' private-indicator "$summary"
+read_indicator
+if ((INDICATOR_PIXELS >= INDICATOR_MIN)); then
+    printf 'ok    %-22s %s\n' private-indicator "$INDICATOR"
 else
-    printf 'FAIL  %-22s mask icon not in the tab strip: %s\n' private-indicator "$summary"
+    printf 'FAIL  %-22s mask icon not in the tab strip: %s\n' private-indicator "$INDICATOR"
     failures=$((failures + 1))
 fi
+# Private browsing keeps cookies and history only until Firefox quits.
+check_restart on no 0
 
 # Firefox saves a .torrent link straight into /config/downloads, which
 # qBittorrent watches. The image's default prefs set browser.download.dir to
@@ -633,8 +811,52 @@ fi
 # (measured), so the file comes over HTTP, as application/x-bittorrent, from
 # torrent_server.py in the container's network namespace (the container still
 # has no network).
+mkdir -p "$WORK/web"
+python3 -I "$REPO/tests/qbittorrent/make_torrent.py" "$WORK/torrent-content" \
+    "$WORK/web/test.torrent" >/dev/null
+TORRENT_SHA=$(shasum -a 256 "$WORK/web/test.torrent" | cut -d ' ' -f 1)
+
+# check_torrent_download LABEL DIR: with download-page.html shown, clicks its
+# link to test.torrent (served from $WORK/web) and checks that the file lands
+# in DIR (mounted at /config/downloads) without a prompt.
+check_torrent_download() {
+    local label=$1 dir=$2 deadline downloaded="" listing prompts="" window properties
+    checks=$((checks + 1))
+    in_x xdotool windowactivate --sync "$WINDOW" \
+        mousemove "$((DISPLAY_W / 2))" "$((DISPLAY_H / 2))" click 1
+    # Firefox writes NAME.part, then renames it. A save prompt would leave only the
+    # .part file until someone answers it.
+    deadline=$((SECONDS + 30))
+    while ((SECONDS < deadline)); do
+        if [[ -f "$dir/test.torrent" ]] &&
+            ! compgen -G "$dir/*.part" >/dev/null &&
+            [[ "$(shasum -a 256 "$dir/test.torrent" | cut -d ' ' -f 1)" == "$TORRENT_SHA" ]]; then
+            downloaded=yes
+            break
+        fi
+        sleep 0.5
+    done
+    listing=$(find "$dir" -mindepth 1 -maxdepth 1 -exec basename {} \; | sort | paste -sd ' ' -)
+    # Any visible window besides the browser window, except Firefox's pop-up panels
+    # (role "Popup", such as the first private download's "Files stay on your
+    # device" notice), would be a prompt such as "Opening test.torrent".
+    for window in $(in_x xdotool search --onlyvisible --name . 2>/dev/null || true); do
+        [[ "$window" != "$WINDOW" ]] || continue
+        properties=$(in_x obxprop --id "$window")
+        if ! grep -qxF 'WM_WINDOW_ROLE(STRING) = "Popup"' <<<"$properties"; then
+            prompts+="\"$(in_x xdotool getwindowname "$window")\" "
+        fi
+    done
+    if [[ -n "$downloaded" && -z "$prompts" ]]; then
+        printf 'ok    %-22s /config/downloads: %s\n' "$label" "$listing"
+    else
+        printf 'FAIL  %-22s /config/downloads: %s; other windows: %s\n' "$label" \
+            "${listing:-(empty)}" "${prompts:-none}"
+        failures=$((failures + 1))
+    fi
+}
+
 echo "== scenario 7: a .torrent link downloads into /config/downloads without a prompt"
-TORRENT_PORT=8765 # download-page.html links to this port
 checks=$((checks + 1))
 if ! python3 -I -c '
 import json, sys
@@ -646,60 +868,12 @@ sys.exit(not any(v["target"] == "/config/downloads" and not v.get("read_only") f
 else
     echo "ok    the firefox service mounts a writable directory at /config/downloads"
 fi
-mkdir -p "$WORK/web" "$WORK/downloads"
+mkdir -p "$WORK/downloads"
 chmod 0777 "$WORK/downloads" # Firefox runs as the image's user
-python3 -I "$REPO/tests/qbittorrent/make_torrent.py" "$WORK/torrent-content" \
-    "$WORK/web/test.torrent" >/dev/null
-expected_sha=$(shasum -a 256 "$WORK/web/test.torrent" | cut -d ' ' -f 1)
 start_firefox_windowed download-page.html "e2e download page" \
     -v "$WORK/downloads:/config/downloads"
-docker run -d --rm --name "$CONTAINER-web" --network "container:$CONTAINER" \
-    -v "$E2E_DIR:/e2e:ro" -v "$WORK/web:/srv:ro" "$PROBE_IMAGE" \
-    python -I /e2e/torrent_server.py "$TORRENT_PORT" /srv >/dev/null
-deadline=$((SECONDS + 30))
-until docker exec "$CONTAINER" wget -q -O /dev/null "http://127.0.0.1:$TORRENT_PORT/test.torrent" \
-    2>/dev/null; do
-    if ((SECONDS >= deadline)); then
-        echo "FAIL: torrent_server.py did not start" >&2
-        docker logs "$CONTAINER-web" >&2
-        exit 1
-    fi
-    sleep 0.5
-done
-checks=$((checks + 1))
-in_x xdotool windowactivate --sync "$WINDOW" mousemove "$((DISPLAY_W / 2))" "$((DISPLAY_H / 2))" click 1
-# Firefox writes NAME.part, then renames it. A save prompt would leave only the
-# .part file until someone answers it.
-deadline=$((SECONDS + 30))
-downloaded=""
-while ((SECONDS < deadline)); do
-    if [[ -f "$WORK/downloads/test.torrent" ]] &&
-        ! compgen -G "$WORK/downloads/*.part" >/dev/null &&
-        [[ "$(shasum -a 256 "$WORK/downloads/test.torrent" | cut -d ' ' -f 1)" == "$expected_sha" ]]; then
-        downloaded=yes
-        break
-    fi
-    sleep 0.5
-done
-listing=$(find "$WORK/downloads" -mindepth 1 -maxdepth 1 -exec basename {} \; | sort | paste -sd ' ' -)
-# Any visible window besides the browser window, except Firefox's pop-up panels
-# (role "Popup", such as the first private download's "Files stay on your
-# device" notice), would be a prompt such as "Opening test.torrent".
-prompts=""
-for window in $(in_x xdotool search --onlyvisible --name . 2>/dev/null || true); do
-    [[ "$window" != "$WINDOW" ]] || continue
-    properties=$(in_x obxprop --id "$window")
-    if ! grep -qxF 'WM_WINDOW_ROLE(STRING) = "Popup"' <<<"$properties"; then
-        prompts+="\"$(in_x xdotool getwindowname "$window")\" "
-    fi
-done
-if [[ -n "$downloaded" && -z "$prompts" ]]; then
-    printf 'ok    %-22s /config/downloads: %s\n' torrent-download "$listing"
-else
-    printf 'FAIL  %-22s /config/downloads: %s; other windows: %s\n' torrent-download \
-        "${listing:-(empty)}" "${prompts:-none}"
-    failures=$((failures + 1))
-fi
+start_web_server "$WORK/web"
+check_torrent_download torrent-download "$WORK/downloads"
 
 # Firefox lets a page that captures the camera or microphone (a video call)
 # gather candidates on every interface and see their real addresses; for other
@@ -902,6 +1076,86 @@ if ((failures > audio_failures)); then
     echo "the audio services' log:"
     docker logs "$CONTAINER" 2>&1 | grep -E '^\[(pulseaudio|audiorecorder|nginx) *\]' || true
 fi
+
+# check_indicator LABEL SHOWN: the private browsing indicator is shown (SHOWN
+# "yes") or not ("no") in the test container's tab strip.
+check_indicator() {
+    checks=$((checks + 1))
+    read_indicator
+    if [[ "$2" == yes ]] && ((INDICATOR_PIXELS >= INDICATOR_MIN)); then
+        printf 'ok    %-22s shown: %s\n' "$1" "$INDICATOR"
+    elif [[ "$2" == no ]] && ((INDICATOR_PIXELS < INDICATOR_MIN)); then
+        printf 'ok    %-22s not shown: %s\n' "$1" "$INDICATOR"
+    else
+        printf 'FAIL  %-22s want shown: %s, got %s\n' "$1" "$2" "$INDICATOR"
+        failures=$((failures + 1))
+    fi
+}
+
+# With private browsing off (FIREFOX_PRIVATE_BROWSING false or unset), Firefox
+# keeps history, cookies and site data in /config, as a normal profile. Its
+# window is not private, and a private window can't share it (Firefox does not
+# move tabs between private and normal windows), so single-window.cfg closes
+# any private window. Then each direction of a switch on an existing /config:
+# the image writes the pref again at every start, so it applies at once.
+echo "== scenario 10: private browsing off: no indicator, the profile is kept, one window"
+FIREFOX_ARGS=("${OFF_ARGS[@]}")
+mkdir -p "$WORK/downloads-off"
+chmod 0777 "$WORK/downloads-off"
+check_restart off yes "1 or more" -v "$WORK/downloads-off:/config/downloads"
+check_prefs
+check_indicator no-private-indicator no
+load_url file:///e2e/single-window-page.html "sw:main " >/dev/null || true
+check_single_window off-ctrl-shift-p main - in_x xdotool key ctrl+shift+p
+check_single_window off-shift-click "main shift-click" shift-click \
+    in_x xdotool mousemove "$((DISPLAY_W / 2))" "$link_y" keydown shift click 1 keyup shift
+check_single_window off-private-window "main shift-click" - open_private_window private
+load_url file:///e2e/download-page.html "e2e download page" >/dev/null || true
+start_web_server "$WORK/web"
+check_torrent_download off-torrent-download "$WORK/downloads-off"
+stop_firefox
+# Off to on: the profile above, now private. A private session has its own
+# cookie jar, so the cookie the normal session kept does not show.
+FIREFOX_ARGS=("${SERVICE_ARGS[@]}")
+start_firefox_windowed blank-page.html "e2e blank page" -v "$WORK/profile-off:/config"
+check_indicator off-to-on-indicator yes
+start_web_server "$E2E_DIR"
+title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page earlier") || true
+check_kept off-to-on-cookie "e2e cookie page earlier-cookie=no" "$title"
+stop_firefox
+# On to off: scenario 6's profile, which had private browsing on at both starts.
+FIREFOX_ARGS=("${OFF_ARGS[@]}")
+start_firefox_windowed blank-page.html "e2e blank page" -v "$WORK/profile-on:/config"
+check_prefs
+check_indicator on-to-off-indicator no
+FIREFOX_ARGS=("${SERVICE_ARGS[@]}")
+
+# The image writes an FF_PREF_* value into prefs.js as it is, and Firefox takes
+# anything but true there for off without a word (measured: yes, True, 1 and
+# "true"). config/firefox-init.d/54-firefox-private-browsing.sh must stop the
+# container first, saying why, so a typo meant to turn private browsing on
+# can't leave it off.
+echo "== scenario 11: a FIREFOX_PRIVATE_BROWSING other than true or false stops the container"
+BAD_MESSAGE="54-firefox-private-browsing.sh: FIREFOX_PRIVATE_BROWSING is 'yes', not true or false."
+checks=$((checks + 1))
+docker rm -f "$CONTAINER-bad" >/dev/null 2>&1 || true
+docker run -d --name "$CONTAINER-bad" --network none "${BAD_ARGS[@]}" "$IMAGE" >/dev/null
+deadline=$((SECONDS + 60))
+while [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER-bad")" == true ]] &&
+    ((SECONDS < deadline)); do
+    sleep 1
+done
+bad_state=$(docker inspect -f 'running={{.State.Running}} exit={{.State.ExitCode}}' "$CONTAINER-bad")
+bad_log=$(docker logs "$CONTAINER-bad" 2>&1)
+if [[ "$bad_state" == "running=false exit="[1-9]* ]] && grep -qF "$BAD_MESSAGE" <<<"$bad_log" &&
+    ! grep -qF '56-firefox-set-prefs-from-env.sh: executing' <<<"$bad_log"; then
+    printf 'ok    %-22s %s: %s\n' bad-value-stops "$bad_state" "$(grep -F "$BAD_MESSAGE" <<<"$bad_log")"
+else
+    printf 'FAIL  %-22s %s; the log ends:\n' bad-value-stops "$bad_state"
+    tail -n 5 <<<"$bad_log"
+    failures=$((failures + 1))
+fi
+docker rm -f "$CONTAINER-bad" >/dev/null
 
 if ((failures > 0)); then
     echo "$failures of $checks check(s) failed"

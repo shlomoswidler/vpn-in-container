@@ -28,7 +28,8 @@
 #   - qBittorrent's Host-header check (the DNS rebinding defense) refuses any
 #     name but localhost and 127.0.0.1, and its clients' URLs still work
 #   - the Firefox web UI (serving the patched noVNC files, ui.js with the
-#     content hash that busts caches), private browsing and the single window
+#     content hash that busts caches), private browsing as FIREFOX_PRIVATE_BROWSING
+#     in .env sets it, and the single window
 #   - Autoheal reaches Docker only through its socket proxy, which lets it list
 #     containers and restart one, and refuses everything else (create, inspect,
 #     exec, stop)
@@ -977,11 +978,42 @@ if [[ -n "$web_version" ]] &&
 else
     fail "index.html does not load ./app/ui.js?v=<webUniqueVersion> ('$web_version')"
 fi
-if docker exec "$FIREFOX" grep -qxF 'user_pref("browser.privatebrowsing.autostart", true);' \
-    /config/profile/prefs.js; then
-    pass "private browsing is set to always on"
+# Permanent private browsing follows FIREFOX_PRIVATE_BROWSING in .env, as Compose
+# resolves it (config.json above): the running container got that entry, its init
+# script accepted it, and prefs.js has the pref true when on, and no true line when
+# off (Firefox leaves out a value equal to its default, false).
+private_entry=$(compose_value firefox env:FF_PREF_PRIVATE_BROWSING)
+running_entry=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$FIREFOX" 2>/dev/null |
+    sed -n 's/^FF_PREF_PRIVATE_BROWSING=//p' || true)
+private_line=$(docker exec "$FIREFOX" grep -F 'user_pref("browser.privatebrowsing.autostart",' \
+    /config/profile/prefs.js 2>/dev/null || true)
+firefox_log=$(docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' "$FIREFOX")" \
+    "$FIREFOX" 2>&1 || true)
+case "$private_entry" in
+    browser.privatebrowsing.autostart=true)
+        private_mode=on
+        want_lines=('user_pref("browser.privatebrowsing.autostart", true);')
+        ;;
+    browser.privatebrowsing.autostart=false)
+        private_mode=off
+        want_lines=('' 'user_pref("browser.privatebrowsing.autostart", false);')
+        ;;
+    *)
+        private_mode=""
+        want_lines=()
+        ;;
+esac
+private_line_ok=no
+# (The ${...+...} form expands an empty array without an error in bash 3.2 too.)
+for want in ${want_lines[@]+"${want_lines[@]}"}; do
+    [[ "$private_line" == "$want" ]] && private_line_ok=yes
+done
+if [[ -n "$private_mode" && "$running_entry" == "$private_entry" && "$private_line_ok" == yes ]] &&
+    grep -qF "54-firefox-private-browsing.sh: permanent private browsing is $private_mode" \
+        <<<"$firefox_log"; then
+    pass "private browsing is $private_mode, as FIREFOX_PRIVATE_BROWSING in .env sets ($private_entry)"
 else
-    fail "prefs.js does not set browser.privatebrowsing.autostart to true"
+    fail "private browsing: Compose resolves '$private_entry', the container has '$running_entry', prefs.js has '${private_line:-no line}'; init log: $(grep -F 54-firefox-private-browsing.sh <<<"$firefox_log" | tail -n 1)"
 fi
 windows=$(docker exec -u "$FIREFOX_UID" -e DISPLAY=:0 "$FIREFOX" \
     xdotool search --onlyvisible --classname Navigator 2>/dev/null | wc -l | tr -d ' ')

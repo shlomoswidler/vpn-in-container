@@ -347,6 +347,76 @@ class QstickyPasswordTests(unittest.TestCase):
             self.assertEqual(self.password(env_file, QBITTORRENT_PASS="from-shell"), "from-shell")
 
 
+class PrivateBrowsingTests(unittest.TestCase):
+    """FIREFOX_PRIVATE_BROWSING=true turns on permanent private browsing; else Firefox's default.
+
+    The firefox service always passes the pref, false included: without an entry the image
+    leaves the last line it wrote in prefs.js, so a profile that once had true would stay
+    private (measured). Any other value reaches the container unchanged, where
+    config/firefox-init.d/54-firefox-private-browsing.sh refuses it.
+    """
+
+    PREF = "browser.privatebrowsing.autostart"
+    # The example line in .env.example, commented out so the default (off) applies.
+    EXAMPLE = "# FIREFOX_PRIVATE_BROWSING=true"
+    INIT_SCRIPT = REPO_ROOT / "config" / "firefox-init.d" / "54-firefox-private-browsing.sh"
+
+    def entry(self, env_file: Path, **variables: str | None) -> str | None:
+        # The env files below set only what is tested; the compose file requires a key.
+        variables = {"GLUETUN_API_KEY": "test-key", **variables}
+        firefox = compose_config(env_file, **variables)["services"]["firefox"]
+        return firefox.get("environment", {}).get("FF_PREF_PRIVATE_BROWSING")
+
+    def entry_from(self, *lines: str, **variables: str | None) -> str | None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / ".env"
+            env_file.write_text("".join(f"{line}\n" for line in lines))
+            return self.entry(env_file, **variables)
+
+    def test_env_example_leaves_it_off(self):
+        self.assertEqual(self.entry(ENV_FILE, FIREFOX_PRIVATE_BROWSING=None), f"{self.PREF}=false")
+
+    def test_unset_or_empty_is_off(self):
+        for lines in (("COMPOSE_PROJECT_NAME=vpn-in-container",), ("FIREFOX_PRIVATE_BROWSING=",)):
+            with self.subTest(lines=lines):
+                self.assertEqual(
+                    self.entry_from(*lines, FIREFOX_PRIVATE_BROWSING=None), f"{self.PREF}=false"
+                )
+
+    def test_the_documented_example_line_turns_it_on(self):
+        self.assertIn(self.EXAMPLE, ENV_FILE.read_text().splitlines())
+        uncommented = self.EXAMPLE.removeprefix("# ")
+        self.assertEqual(
+            self.entry_from(uncommented, FIREFOX_PRIVATE_BROWSING=None), f"{self.PREF}=true"
+        )
+
+    def test_false_and_the_shell_environment(self):
+        on = "FIREFOX_PRIVATE_BROWSING=true"
+        off = "FIREFOX_PRIVATE_BROWSING=false"
+        self.assertEqual(self.entry_from(off, FIREFOX_PRIVATE_BROWSING=None), f"{self.PREF}=false")
+        self.assertEqual(
+            self.entry_from(on, FIREFOX_PRIVATE_BROWSING="false"), f"{self.PREF}=false"
+        )
+        self.assertEqual(self.entry_from(off, FIREFOX_PRIVATE_BROWSING="true"), f"{self.PREF}=true")
+
+    def test_other_values_reach_the_container_unchanged(self):
+        # Compose cannot check a value; the init script in the container does.
+        for value in ("yes", "True", "1"):
+            with self.subTest(value=value):
+                line = f"FIREFOX_PRIVATE_BROWSING={value}"
+                self.assertEqual(
+                    self.entry_from(line, FIREFOX_PRIVATE_BROWSING=None), f"{self.PREF}={value}"
+                )
+
+    def test_the_check_is_mounted_where_the_image_runs_it(self):
+        firefox = compose_config(FIREFOX_PRIVATE_BROWSING=None)["services"]["firefox"]
+        target = f"/etc/cont-init.d/{self.INIT_SCRIPT.name}"
+        mounts = [v for v in firefox.get("volumes", []) if v.get("target") == target]
+        self.assertEqual(len(mounts), 1, firefox.get("volumes"))
+        self.assertEqual(mounts[0]["source"], str(self.INIT_SCRIPT))
+        self.assertIs(mounts[0].get("read_only"), True)
+
+
 class ComposeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

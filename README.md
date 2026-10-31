@@ -5,6 +5,8 @@ A Docker Compose stack providing a privacy-focused, containerized browsing envir
 ## Features
 
 - **Firefox browser** accessible via web interface (noVNC) at `http://localhost:5800`, with sound
+- **Optional permanent private browsing**: `FIREFOX_PRIVATE_BROWSING=true` in `.env` (off by
+  default)
 - **qBittorrent** with web UI at `http://localhost:9080`
 - **Automatic torrent handoff**: Download `.torrent` files in Firefox → qBittorrent auto-imports them
 - **Automatic port forwarding**: qSticky syncs the VPN's forwarded port to qBittorrent
@@ -83,6 +85,12 @@ Fill in these required values:
 - `PUID` and `PGID`: the output of `id -u` and `id -g` (`docker compose` refuses to start without
   them; `./start.sh` fills them in when they are empty)
 
+Optional:
+- `FIREFOX_PRIVATE_BROWSING`: `true` to make Firefox always browse in private mode; unset or
+  `false` (the default) for normal browsing. See [Private
+  Browsing](#private-browsing-firefox_private_browsing).
+- `DOWNLOADS_PATH`: where downloads go (see step 3).
+
 > **Note:** The `.env.example` includes `COMPOSE_PROJECT_NAME=vpn-in-container`. Do not remove this — it prevents Docker Compose from normalizing hyphens to underscores in volume mount paths, which would break all container configurations. See [Troubleshooting](#containers-start-with-empty-config--wrong-mount-paths) for details.
 
 > **Upgrading from an earlier version:** the API key used to be kept a second time, in
@@ -142,9 +150,8 @@ docker compose stop
 
 ### How Firefox Behaves in the Container
 
-- **Private browsing, always:** history, cookies and site data are not kept.
-  The mask icon and "Private browsing" label at the right end of the tab strip
-  show it is on (Firefox only shows it when it really is).
+- **Private browsing only if you turn it on:** see [Private
+  Browsing](#private-browsing-firefox_private_browsing) below. Off by default.
 - **WebRTC shows only the VPN's address:** web pages, video calls included, never see the
   container's own network addresses (the `FF_PREF_WEBRTC_*` entries in `docker-compose.yml`).
 - **Your own mouse cursors:** the web UI shows your computer's native cursors
@@ -161,6 +168,45 @@ docker compose stop
   - Settings: the single-window `FF_PREF_*` entries in `docker-compose.yml`,
     `config/firefox-autoconfig/`, `config/firefox-profile/customKeys.json` and
     `config/firefox-chrome/userChrome.css`.
+
+### Private Browsing (`FIREFOX_PRIVATE_BROWSING`)
+
+Off by default, as in Firefox itself. To turn it on, add this line to `.env` (the commented
+example is in `.env.example`) and run `docker compose up -d`:
+
+```bash
+FIREFOX_PRIVATE_BROWSING=true
+```
+
+- **On (`true`):** Firefox always browses in private mode. History, cookies (and with them the
+  sites you are signed in to) and site data last only until Firefox restarts with the container,
+  so sites can't recognize you from one session to the next. The mask icon and "Private
+  browsing" label at the right end of the tab strip show it is on (Firefox only shows it when
+  it really is).
+- **Off (unset, empty or `false`):** a normal Firefox profile. History, cookies, logins and site
+  data are kept in `./config/firefox` on your host, and sites can recognize you across sessions,
+  as in any browser (still through the VPN: they see the VPN's address, not yours). Anyone who
+  can read that folder can read them.
+- **Switching:** change the line in `.env` and run `docker compose up -d`; the firefox container
+  is recreated and the change applies at that start, in either direction. What a normal session
+  saved stays in `./config/firefox`; private mode does not show it (its cookies, for example).
+  The setting is always written into Firefox's `prefs.js`, `false` included, so turning it off
+  on a profile that had it on does turn it off.
+- **Only `true` or `false`:** anything else (`yes`, `True`, `1`, a comment right after the
+  `=`) would leave private browsing off without a word, so the firefox container exits at start instead,
+  with the reason in `docker compose logs firefox`, and `./start.sh` refuses it before starting
+  anything. Unset or empty means off.
+- **One window, either way:** with private browsing off, a private window could not share
+  Firefox's one window (Firefox does not move tabs between private and normal windows), so
+  Ctrl+Shift+P does nothing, its menu items are hidden, and a private window opened any other
+  way (a toolbar button, an extension) is closed at once.
+- **Downloads** go to the same folder either way. With private browsing on, Firefox's first
+  download shows a "Files stay on your device" notice with a "Delete files automatically" button,
+  which asks Firefox to delete files downloaded in private mode after the private session ends.
+  Choose "Got it" to keep downloads (`.torrent` files included) in the downloads folder as usual.
+  (Tested with that setting on: a downloaded `.torrent` was still there after the container
+  stopped and started again, so do not count on the deletion here either.) With private browsing
+  off, downloads are not private, and the notice does not appear.
 
 ### Sound
 
@@ -190,8 +236,9 @@ sound.
 Why the container's Firefox does not allow sites to autoplay sound
 (`media.autoplay.default` stays at Firefox's default, 1: block audible autoplay): with it
 allowed, any page, an ad included, could start making noise in every open web UI tab. The
-click a site needs is the one you would make anyway, and a per-site "allow" would not last,
-since permanent private browsing keeps no site permission past a restart. To allow it
+click a site needs is the one you would make anyway, and with private browsing on a per-site
+"allow" would not last, since private browsing keeps no site permission past a restart (with
+it off, a per-site allow is kept like any other site setting). To allow it
 anyway, add `- FF_PREF_AUTOPLAY=media.autoplay.default=0` to the firefox service's
 `environment:` (tests/e2e/run.sh then checks that it reaches Firefox).
 
@@ -215,9 +262,10 @@ What is tested automatically (see [Automated Tests](#automated-tests)), and what
 
 ### Configure Torrent Control (First Time Only)
 
-The Torrent Control extension is pre-installed, and allowed in private windows (every window here
-is private), both by `config/firefox-policies/policies.json`. Configure it once to enable
-one-click magnet links:
+The Torrent Control extension is pre-installed, and allowed in private windows (with
+`FIREFOX_PRIVATE_BROWSING=true` every window is private; with it off the permission is unused),
+both by `config/firefox-policies/policies.json`. Configure it once to enable one-click magnet
+links:
 
 1. In Firefox (at `http://localhost:5800`), click the Torrent Control extension icon (puzzle piece in toolbar)
 2. Click **Options/Settings**
@@ -395,8 +443,9 @@ fetches an unpinned BuildKit frontend and builds on Alpine 3.18.
 tests/stack/run.sh     # the running stack: VPN egress and kill switch, DNS, port forwarding,
                        # qSticky, qBittorrent (API, settings, watch folder), Firefox, Autoheal
                        # and its Docker socket proxy, loopback-only web UI ports
-tests/e2e/run.sh       # Firefox in throwaway containers: cursors, single window, private browsing,
-                       # downloads, WebRTC, sound to the web UI's audio stream
+tests/e2e/run.sh       # Firefox in throwaway containers: cursors, single window, private browsing
+                       # on and off (and switching), downloads, WebRTC, sound to the web UI's
+                       # audio stream
 tests/browser/run.sh   # the web UI in headless Chrome and Firefox: the patched noVNC cursor,
                        # the audio player, and sound through the real web UI of a throwaway
                        # container, also across a restart of it
@@ -559,6 +608,10 @@ docker compose ps
 docker compose logs vpn
 ```
 
+If Firefox exits right after it starts, check `docker compose logs firefox` for
+`FIREFOX_PRIVATE_BROWSING is '...', not true or false`: set it to `true` or `false` in `.env`
+(or remove the line), then run `docker compose up -d`.
+
 ### Containers Start With Empty Config / Wrong Mount Paths
 
 Docker Compose v2 normalizes the project name by replacing hyphens with underscores. This can cause relative volume mounts (e.g. `./config/firefox`) to resolve to `vpn_in_container/config/...` instead of `vpn-in-container/config/...`. When this happens, Docker auto-creates empty directories at the wrong path and containers start with no configuration.
@@ -626,12 +679,14 @@ vpn-in-container/
 │   ├── firefox/            # Browser profile (gitignored)
 │   ├── firefox-autoconfig/
 │   │   ├── autoconfig.js   # Loads single-window.cfg (Firefox autoconfig)
-│   │   └── single-window.cfg  # Moves any second window's tabs into the first window
+│   │   └── single-window.cfg  # Moves any second window's tabs into the first window (closes a
+│   │                          # private one when private browsing is off)
 │   ├── firefox-chrome/
 │   │   └── userChrome.css  # No toolbar window dragging; hides new/close window menu items
 │   ├── firefox-profile/
 │   │   └── customKeys.json # Clears the new-window and close-window shortcuts
 │   ├── firefox-init.d/
+│   │   ├── 54-firefox-private-browsing.sh  # Refuses a FIREFOX_PRIVATE_BROWSING but true/false
 │   │   ├── 57-openbox-no-keepborder.sh  # Removes the 1px top border (unthemed cursor strip)
 │   │   └── 58-openbox-no-alt-drag.sh    # Removes Openbox's Alt+drag move/resize bindings
 │   ├── firefox-policies/

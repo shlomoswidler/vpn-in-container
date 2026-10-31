@@ -8,6 +8,9 @@
 # neither sets one does this script use your own IDs (id -u, id -g).
 # DOWNLOADS_PATH is left to Compose: from the environment or .env, or else the
 # compose file's default, ${HOME}/Downloads/vpn-in-container.
+# FIREFOX_PRIVATE_BROWSING (environment, else .env) must be true, false or
+# unset. The firefox container refuses any other value at start; checked here
+# too, so this script stops before starting anything.
 # START_WAIT_TIMEOUT: seconds to wait for the services (default 300).
 
 set -euo pipefail
@@ -81,12 +84,28 @@ check_id() {
     fi
 }
 
+# Checks FIREFOX_PRIVATE_BROWSING: true, false, or unset or empty (off). As in
+# Compose, a variable set in the environment wins over .env, even when empty.
+check_private_browsing() {
+    local value="${FIREFOX_PRIVATE_BROWSING:-}" source="the environment"
+    if [[ -z "${FIREFOX_PRIVATE_BROWSING+set}" ]]; then
+        value=$(env_file_value FIREFOX_PRIVATE_BROWSING)
+        source=".env"
+    fi
+    if [[ -n "$value" && "$value" != true && "$value" != false ]]; then
+        echo "FIREFOX_PRIVATE_BROWSING from $source is '$value', not true or false." >&2
+        echo "Set it to true or false, or leave it out (off); comments in .env go on their own line." >&2
+        exit 1
+    fi
+}
+
 if [[ ! "$WAIT_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
     echo "START_WAIT_TIMEOUT must be a whole number of seconds, not '$WAIT_TIMEOUT'" >&2
     exit 1
 fi
 check_id PUID u "$(id -u)"
 check_id PGID g "$(id -g)"
+check_private_browsing
 
 # Every service in docker-compose.yml must be running and healthy (each has a
 # healthcheck). Compose v5.5.0's --wait-timeout can exit 0 when the time runs
