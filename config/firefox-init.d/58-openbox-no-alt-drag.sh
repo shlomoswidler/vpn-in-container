@@ -9,9 +9,16 @@
 set -e # Exit immediately if a command exits with a non-zero status.
 set -u # Treat unset variables as an error.
 
-RC=/var/run/openbox/rc.xml
+# OPENBOX_RC overrides the path for tests (tests/test_openbox_init.py).
+RC=${OPENBOX_RC:-/var/run/openbox/rc.xml}
 
-sed -i '/<context name="Frame">/,/<\/context>/d' "$RC"
+# Edited through a temporary file next to rc.xml rather than with sed -i, whose
+# syntax differs between BusyBox/GNU sed (the image) and BSD sed (macOS, where
+# the tests run).
+tmp=$(mktemp "$RC.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+sed '/<context name="Frame">/,/<\/context>/d' "$RC" > "$tmp"
+cat "$tmp" > "$RC"
 
 if grep -q '<context name="Frame">' "$RC" || ! grep -q '<context name="Client">' "$RC"; then
     echo "could not remove the Frame mouse context from $RC" >&2
