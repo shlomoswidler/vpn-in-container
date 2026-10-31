@@ -236,8 +236,15 @@ services:
     image: willfarrell/autoheal:latest@sha256:c4227b7a25b8ef08829ad3ad440af3a821e4277c9b1b2050a3f671ad9d87bfc6
     container_name: autoheal
     restart: always
-    network_mode: none
+    # No Docker socket: autoheal reaches the Docker API only through autoheal-proxy, on an
+    # internal network with no route out.
+    networks:
+      - autoheal-docker
+    depends_on:
+      autoheal-proxy:
+        condition: service_healthy
     environment:
+      - DOCKER_SOCK=tcp://autoheal-proxy:2375
       # Only heal containers labelled `autoheal=true` (this project's services).
       # `all` would restart every unhealthy container on the host, including
       # containers belonging to unrelated Docker Compose projects.
@@ -246,5 +253,48 @@ services:
       - AUTOHEAL_START_PERIOD=120
       - AUTOHEAL_DEFAULT_STOP_TIMEOUT=30
       - TZ=${TZ:-America/New_York}
+
+  # ===========================================
+  # Autoheal's Docker socket proxy
+  # ===========================================
+  autoheal-proxy:
+    # HAProxy in front of the Docker socket. config/autoheal-proxy/haproxy.cfg replaces the
+    # image's template: only GET /_ping, GET /containers/json and
+    # POST /containers/<64-hex ID>/restart reach the daemon; everything else gets 403.
+    # No CONTAINERS/ALLOW_RESTARTS env on purpose: if the template mount stopped being
+    # used, the image's defaults would deny container access and autoheal would fail visibly.
+    # Pinned by tag and digest; upgrade deliberately and run tests/stack/run.sh.
+    image: lscr.io/linuxserver/socket-proxy:3.4.7-r0-ls104@sha256:4e5e59efd3338205561c54262581992036e5a36ccca97d487b1d4ec41f9adc58
+    container_name: autoheal-proxy
+    restart: always
+    # Root inside, with no capabilities: the socket's group differs per host (root on
+    # OrbStack, docker on Linux). The entrypoint writes its rendered config to /run.
+    read_only: true
+    tmpfs:
+      - /run
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - LOG_LEVEL=info
     volumes:
+      # Read-only stops writes to the socket file, not API calls: the allowlist limits those.
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./config/autoheal-proxy/haproxy.cfg:/templates/haproxy.cfg:ro
+    networks:
+      - autoheal-docker
+    # No autoheal label: autoheal restarts through this proxy, so it cannot heal it.
+    # restart: always brings HAProxy back if it exits.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2375/_ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+      start_interval: 2s
+
+networks:
+  # Only autoheal and its proxy: no route out, nothing published.
+  autoheal-docker:
+    internal: true

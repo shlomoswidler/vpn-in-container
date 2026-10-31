@@ -1,5 +1,7 @@
 """Static tests of docker-compose.yml: image pins, Autoheal scoping, network isolation.
 
+Also checks config/autoheal-proxy/haproxy.cfg, the Docker API allowlist Autoheal goes through.
+
 Reads the resolved model from `docker compose config --format json`, with .env.example as
 the env file (so a local .env does not change the result) and PUID/PGID set to the current
 user (.env.example leaves them empty, and the file requires them). Needs the docker CLI with
@@ -19,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 ENV_FILE = REPO_ROOT / ".env.example"
 GENERATOR = REPO_ROOT / "config" / "cursors" / "generate_native_theme.py"
+PROXY_TEMPLATE = REPO_ROOT / "config" / "autoheal-proxy" / "haproxy.cfg"
 
 # name:tag@sha256:<digest>. The name may include a registry host and port; the tag is the
 # part after the last colon of the reference, so it contains no slash.
@@ -26,6 +29,17 @@ PINNED_IMAGE = re.compile(r"^[^@\s]+:[\w][\w.-]{0,127}@sha256:[0-9a-f]{64}$")
 DOCKER_SOCKET = "/var/run/docker.sock"
 LOOPBACK = "127.0.0.1"
 AUTOHEAL = "autoheal"
+AUTOHEAL_PROXY = "autoheal-proxy"
+AUTOHEAL_NETWORK = "autoheal-docker"
+# Where the linuxserver/socket-proxy entrypoint reads its HAProxy template.
+PROXY_TEMPLATE_TARGET = "/templates/haproxy.cfg"
+# Every http-request rule of the proxy's frontend, in order: what Autoheal needs, then deny.
+PROXY_RULES = [
+    "http-request allow if METH_GET { path -m reg ^(/v[0-9.]+)?/_ping$ }",
+    "http-request allow if METH_GET { path -m reg ^(/v[0-9.]+)?/containers/json$ }",
+    "http-request allow if METH_POST { path -m reg ^(/v[0-9.]+)?/containers/[0-9a-f]{64}/restart$ }",
+    "http-request deny",
+]
 VPN = "vpn"
 BEHIND_VPN = ("firefox", "qbittorrent", "qsticky")
 
@@ -64,23 +78,27 @@ def generator_nominal_size() -> int:
 class ComposeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.services = compose_config()["services"]
+        cls.config = compose_config()
+        cls.services = cls.config["services"]
 
     def test_expected_services_exist(self):
         # The other tests look services up by name; a rename must fail here, not pass vacuously.
-        self.assertEqual(set(self.services), {VPN, AUTOHEAL, *BEHIND_VPN})
+        self.assertEqual(set(self.services), {VPN, AUTOHEAL, AUTOHEAL_PROXY, *BEHIND_VPN})
 
     def test_every_image_is_pinned_by_tag_and_digest(self):
         for name, service in self.services.items():
             with self.subTest(service=name):
                 self.assertRegex(service.get("image", ""), PINNED_IMAGE)
 
-    def test_every_service_but_autoheal_has_the_autoheal_label(self):
+    def test_every_service_but_autoheal_and_its_proxy_has_the_autoheal_label(self):
         for name, service in self.services.items():
-            if name == AUTOHEAL:
-                continue
             with self.subTest(service=name):
-                self.assertEqual(service.get("labels", {}).get(AUTOHEAL), "true")
+                label = service.get("labels", {}).get(AUTOHEAL)
+                if name in (AUTOHEAL, AUTOHEAL_PROXY):
+                    # Autoheal restarts through the proxy: it cannot heal either of them.
+                    self.assertIsNone(label)
+                else:
+                    self.assertEqual(label, "true")
 
     def test_autoheal_is_scoped_to_the_label(self):
         environment = self.services[AUTOHEAL].get("environment", {})
@@ -114,17 +132,65 @@ class ComposeTests(unittest.TestCase):
             with self.subTest(service=name, port=port.get("published")):
                 self.assertEqual(port.get("host_ip"), LOOPBACK)
 
-    def test_the_docker_socket_mount_is_read_only(self):
+    def test_only_the_proxy_mounts_the_docker_socket_read_only(self):
         mounts = [
             (name, volume)
             for name, service in self.services.items()
             for volume in service.get("volumes", [])
             if DOCKER_SOCKET in (volume.get("source"), volume.get("target"))
         ]
-        self.assertTrue(mounts, f"no service mounts {DOCKER_SOCKET}")
-        for name, volume in mounts:
-            with self.subTest(service=name):
-                self.assertIs(volume.get("read_only"), True)
+        self.assertEqual([name for name, _ in mounts], [AUTOHEAL_PROXY])
+        # Read-only stops writes to the socket file, not API calls through it: the
+        # allowlist in haproxy.cfg is what limits them.
+        self.assertIs(mounts[0][1].get("read_only"), True)
+
+    def test_autoheal_reaches_docker_only_through_the_proxy(self):
+        autoheal = self.services[AUTOHEAL]
+        mounts = [volume.get("target") for volume in autoheal.get("volumes", [])]
+        self.assertNotIn(DOCKER_SOCKET, mounts)
+        self.assertEqual(
+            autoheal.get("environment", {}).get("DOCKER_SOCK"), f"tcp://{AUTOHEAL_PROXY}:2375"
+        )
+        self.assertNotIn("network_mode", autoheal)
+        self.assertEqual(set(autoheal.get("networks", {})), {AUTOHEAL_NETWORK})
+        condition = autoheal.get("depends_on", {}).get(AUTOHEAL_PROXY, {}).get("condition")
+        self.assertEqual(condition, "service_healthy")
+
+    def test_the_autoheal_network_is_internal_and_only_autoheal_and_its_proxy_use_it(self):
+        self.assertIs(
+            self.config.get("networks", {}).get(AUTOHEAL_NETWORK, {}).get("internal"), True
+        )
+        members = {
+            name for name, s in self.services.items() if AUTOHEAL_NETWORK in s.get("networks", {})
+        }
+        self.assertEqual(members, {AUTOHEAL, AUTOHEAL_PROXY})
+        self.assertEqual(set(self.services[AUTOHEAL_PROXY].get("networks", {})), {AUTOHEAL_NETWORK})
+
+    def test_the_proxy_is_pinned_hardened_and_uses_the_allowlist(self):
+        proxy = self.services[AUTOHEAL_PROXY]
+        self.assertRegex(proxy.get("image", ""), PINNED_IMAGE)
+        self.assertTrue(proxy["image"].startswith("lscr.io/linuxserver/socket-proxy:"))
+        self.assertIs(proxy.get("read_only"), True)
+        self.assertIn("/run", proxy.get("tmpfs", []))
+        self.assertEqual(proxy.get("cap_drop"), ["ALL"])
+        self.assertIn("no-new-privileges:true", proxy.get("security_opt", []))
+        self.assertTrue(proxy.get("healthcheck", {}).get("test"), "no healthcheck")
+        self.assertFalse(proxy.get("ports"), "publishes ports")
+        template = [v for v in proxy.get("volumes", []) if v.get("target") == PROXY_TEMPLATE_TARGET]
+        self.assertEqual([v.get("source") for v in template], [str(PROXY_TEMPLATE)])
+        self.assertIs(template[0].get("read_only"), True)
+        # The allowlist is the template's only filter: env flags such as CONTAINERS=1 or
+        # ALLOW_RESTARTS=1 would only matter for the image's own template.
+        flags = set(proxy.get("environment", {})) - {"LOG_LEVEL", "TZ"}
+        self.assertEqual(flags, set(), "env flags the template ignores")
+
+    def test_the_proxy_template_allows_only_what_autoheal_needs(self):
+        rules = [
+            line.strip()
+            for line in PROXY_TEMPLATE.read_text().splitlines()
+            if line.strip().startswith("http-request")
+        ]
+        self.assertEqual(rules, PROXY_RULES)
 
     def test_firefox_cursor_size_matches_the_theme(self):
         size = self.services["firefox"].get("environment", {}).get("XCURSOR_SIZE")

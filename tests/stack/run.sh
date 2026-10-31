@@ -24,6 +24,9 @@
 #   - qBittorrent's Host-header check (the DNS rebinding defense) refuses any
 #     name but localhost and 127.0.0.1, and its clients' URLs still work
 #   - the Firefox web UI, private browsing and the single window
+#   - Autoheal reaches Docker only through its socket proxy, which lets it list
+#     containers and restart one, and refuses everything else (create, inspect,
+#     exec, stop)
 #   - Autoheal restarts an unhealthy container labeled autoheal=true and leaves
 #     an unlabeled one alone
 #
@@ -66,7 +69,8 @@ fail() {
 }
 
 cleanup() {
-    docker rm -f "$TEST_ID-labeled" "$TEST_ID-unlabeled" >/dev/null 2>&1 || true
+    docker rm -f "$TEST_ID-labeled" "$TEST_ID-unlabeled" "$TEST_ID-proxy-target" \
+        "$TEST_ID-created" >/dev/null 2>&1 || true
     if [[ -n "$watch_file" ]]; then
         rm -f "$watch_file"
     fi
@@ -84,16 +88,17 @@ trap cleanup EXIT
 docker compose -f "$REPO/docker-compose.yml" config --format json > "$WORK/config.json"
 
 # Prints a value from the resolved compose config: compose_value SERVICE KEY
-# where KEY is "container", "image", "env:<NAME>" or "mount:<target>".
+# where KEY is "container", "image", "env:<NAME>" or "mount:<target>". Prints
+# nothing for a service the file lacks (the checks on it then fail).
 compose_value() {
     python3 -I - "$WORK/config.json" "$1" "$2" <<'EOF'
 import json, sys
 config_path, service, key = sys.argv[1:]
-svc = json.load(open(config_path))["services"][service]
+svc = json.load(open(config_path))["services"].get(service, {})
 if key == "container":
-    print(svc["container_name"])
+    print(svc.get("container_name", ""))
 elif key == "image":
-    print(svc["image"])
+    print(svc.get("image", ""))
 elif key.startswith("env:"):
     print(svc.get("environment", {}).get(key[4:], ""))
 elif key.startswith("mount:"):
@@ -212,16 +217,19 @@ QBT=$(compose_value qbittorrent container)
 QSTICKY=$(compose_value qsticky container)
 FIREFOX=$(compose_value firefox container)
 AUTOHEAL=$(compose_value autoheal container)
+PROXY=$(compose_value autoheal-proxy container)
 FIREFOX_UID=$(compose_value firefox env:USER_ID)
 # qSticky's Gluetun API key, for the control server checks (never printed).
 GLUETUN_API_KEY=$(compose_value qsticky env:GLUETUN_APIKEY)
 export GLUETUN_API_KEY
 
 echo "== containers run the pinned images and are healthy"
-for service in vpn qbittorrent qsticky firefox autoheal; do
+for service in vpn qbittorrent qsticky firefox autoheal autoheal-proxy; do
     container=$(compose_value "$service" container)
     pinned=$(compose_value "$service" image)
-    running=$(docker inspect -f '{{.Config.Image}}' "$container" 2>/dev/null || echo "(not running)")
+    # (docker inspect prints an empty line for a container that does not exist)
+    running=$(docker inspect -f '{{.Config.Image}}' "${container:-none}" 2>/dev/null) ||
+        running="(not running)"
     if [[ "$running" == "$pinned" ]]; then
         pass "$service runs $pinned"
     else
@@ -229,10 +237,11 @@ for service in vpn qbittorrent qsticky firefox autoheal; do
     fi
 done
 deadline=$((SECONDS + HEALTH_TIMEOUT))
-for container in "$VPN" "$QBT" "$QSTICKY" "$FIREFOX"; do
+for container in "$VPN" "$QBT" "$QSTICKY" "$FIREFOX" "${PROXY:-autoheal-proxy}"; do
     status=""
     while ((SECONDS < deadline)); do
-        status=$(docker inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null || echo missing)
+        status=$(docker inspect -f '{{.State.Health.Status}}' "$container" 2>/dev/null) ||
+            status=missing
         [[ "$status" == healthy ]] && break
         sleep 5
     done
@@ -874,6 +883,91 @@ if [[ "$windows" == 1 ]]; then
 else
     fail "Firefox shows $windows windows"
 fi
+
+echo "== Docker socket proxy"
+# Only the proxy may mount the Docker socket (read-only: that stops writes to
+# the socket file, not API calls through it); Autoheal must use the proxy.
+socket_mounts=""
+for container in "$VPN" "$QBT" "$QSTICKY" "$FIREFOX" "$AUTOHEAL" "${PROXY:-autoheal-proxy}"; do
+    mounts=$(docker inspect -f '{{range .Mounts}}{{.Destination}} rw={{.RW}}{{println}}{{end}}' \
+        "$container" 2>/dev/null || true)
+    while read -r destination rw; do
+        if [[ "$destination" == /var/run/docker.sock ]]; then
+            socket_mounts="$socket_mounts $container($rw)"
+        fi
+    done <<<"$mounts"
+done
+if [[ -n "$PROXY" && "$socket_mounts" == " $PROXY(rw=false)" ]]; then
+    pass "only $PROXY mounts the Docker socket, read-only"
+else
+    fail "containers mounting the Docker socket:${socket_mounts:- none} (want only ${PROXY:-autoheal-proxy}, read-only)"
+fi
+autoheal_sock=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$AUTOHEAL" 2>/dev/null |
+    sed -n 's/^DOCKER_SOCK=//p' || true)
+if [[ -n "$PROXY" && "$autoheal_sock" == "tcp://"* ]]; then
+    pass "Autoheal uses the Docker API at $autoheal_sock"
+else
+    fail "Autoheal's DOCKER_SOCK is '$autoheal_sock', not the proxy's tcp:// address"
+fi
+proxy_url="http://${autoheal_sock#tcp://}"
+[[ "$autoheal_sock" == "tcp://"* ]] || proxy_url="http://autoheal-proxy:2375"
+# Sends a request through the proxy from inside Autoheal's container, as
+# Autoheal does: proxy_request METHOD PATH [JSON BODY]. Prints the HTTP status,
+# then "proxy-denied" when the answer is HAProxy's own 403 page, not Docker's.
+proxy_request() {
+    local args=(-s --max-time 20 -X "$1" -w '\n%{http_code}') response
+    [[ -n "${3:-}" ]] && args+=(-H 'Content-Type: application/json' -d "$3")
+    response=$(docker exec "$AUTOHEAL" curl "${args[@]}" "$proxy_url$2" 2>/dev/null) || true
+    printf '%s' "${response##*$'\n'}"
+    [[ "$response" == *"Request forbidden by administrative rules"* ]] && printf ' proxy-denied'
+    echo
+}
+# A target that autoheal ignores (no label) and that the restart may stop at once.
+docker run -d --name "$TEST_ID-proxy-target" --network none "$PLAIN_IMAGE" sleep 600 >/dev/null
+target_id=$(docker inspect -f '{{.Id}}' "$TEST_ID-proxy-target")
+target_start=$(docker inspect -f '{{.State.StartedAt}}' "$TEST_ID-proxy-target")
+result=$(proxy_request GET /containers/json)
+if [[ "$result" == 200 ]]; then
+    pass "the proxy allows GET /containers/json (200)"
+else
+    fail "GET /containers/json through the proxy: $result (want 200)"
+fi
+result=$(proxy_request POST "/containers/create?name=$TEST_ID-created" \
+    "{\"Image\": \"$PLAIN_IMAGE\", \"Cmd\": [\"true\"]}")
+created=no
+docker inspect "$TEST_ID-created" >/dev/null 2>&1 && created=yes
+if [[ "$result" == "403 proxy-denied" && "$created" == no ]]; then
+    pass "the proxy refuses POST /containers/create (403; no container created)"
+else
+    fail "POST /containers/create through the proxy: $result (want 403 proxy-denied); created: $created"
+fi
+result=$(proxy_request GET "/containers/$target_id/json")
+if [[ "$result" == "403 proxy-denied" ]]; then
+    pass "the proxy refuses GET /containers/<id>/json (403: no container's environment)"
+else
+    fail "GET /containers/<id>/json through the proxy: $result (want 403 proxy-denied)"
+fi
+result=$(proxy_request POST "/containers/$target_id/exec" '{"Cmd": ["true"]}')
+if [[ "$result" == "403 proxy-denied" ]]; then
+    pass "the proxy refuses POST /containers/<id>/exec (403)"
+else
+    fail "POST /containers/<id>/exec through the proxy: $result (want 403 proxy-denied)"
+fi
+result=$(proxy_request POST "/containers/$target_id/stop?t=1")
+if [[ "$result" == "403 proxy-denied" &&
+    "$(docker inspect -f '{{.State.Running}}' "$TEST_ID-proxy-target")" == true ]]; then
+    pass "the proxy refuses POST /containers/<id>/stop (403; the container still runs)"
+else
+    fail "POST /containers/<id>/stop through the proxy: $result (want 403 proxy-denied); running: $(docker inspect -f '{{.State.Running}}' "$TEST_ID-proxy-target")"
+fi
+result=$(proxy_request POST "/containers/$target_id/restart?t=1")
+if [[ "$result" == 204 &&
+    "$(docker inspect -f '{{.State.StartedAt}}' "$TEST_ID-proxy-target")" != "$target_start" ]]; then
+    pass "the proxy allows POST /containers/<id>/restart (204; the container restarted)"
+else
+    fail "POST /containers/<id>/restart through the proxy: $result (want 204), or the container did not restart"
+fi
+docker rm -f "$TEST_ID-proxy-target" >/dev/null 2>&1 || true
 
 echo "== Autoheal"
 start_period=$(compose_value autoheal env:AUTOHEAL_START_PERIOD)

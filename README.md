@@ -39,8 +39,10 @@ A Docker Compose stack providing a privacy-focused, containerized browsing envir
               ▼
   ~/Downloads/vpn-in-container/
 
-  [Autoheal] ── monitors this stack's containers via Docker socket
+  [Autoheal] ── monitors this stack's containers through [autoheal-proxy]
               ── restarts any that become unhealthy
+  [autoheal-proxy] ── the only container with the Docker socket; lets
+                      Autoheal list containers and restart one, nothing else
 ```
 
 ## Prerequisites
@@ -249,6 +251,13 @@ belonging to other Docker Compose projects on the same host are ignored. (Do **n
 `AUTOHEAL_CONTAINER_LABEL=all` -- that makes autoheal restart every unhealthy container on
 the machine.)
 
+Autoheal has no Docker socket of its own. It calls the Docker API through `autoheal-proxy`
+(linuxserver/socket-proxy, which is HAProxy), on an internal network with no route out. The
+proxy's allowlist, `config/autoheal-proxy/haproxy.cfg`, passes only `GET /_ping`,
+`GET /containers/json` and `POST /containers/<full ID>/restart`; everything else gets 403. The
+proxy and Autoheal carry no `autoheal=true` label, since Autoheal cannot heal its own path to
+Docker; both use `restart: always`.
+
 **Recovery flow**:
 - VPN outage: Gluetun reconnects the tunnel itself (seconds); nothing else restarts.
 - Gluetun container restart (for example by Autoheal): the services sharing its network fail their
@@ -265,6 +274,7 @@ Additionally, `depends_on: restart: true` ensures `docker compose restart vpn` c
 ```bash
 tests/stack/run.sh     # the running stack: VPN egress and kill switch, DNS, port forwarding,
                        # qSticky, qBittorrent (API, settings, watch folder), Firefox, Autoheal
+                       # and its Docker socket proxy, loopback-only web UI ports
 tests/e2e/run.sh       # Firefox in throwaway containers: cursors, single window, private browsing
 tests/browser/run.sh   # the patched noVNC in headless Chrome and Firefox
 tests/stack/recovery.sh        # DISRUPTIVE: restarts the VPN container and times the recovery
@@ -429,6 +439,8 @@ vpn-in-container/
 ├── .env                    # Your credentials (gitignored)
 ├── .env.example            # Template
 ├── config/
+│   ├── autoheal-proxy/
+│   │   └── haproxy.cfg     # Docker API allowlist for Autoheal (list, restart by ID)
 │   ├── cursors/
 │   │   ├── README.md       # How native cursors work; upgrading the image
 │   │   ├── generate_native_theme.py  # Generates native-css/
@@ -488,7 +500,13 @@ vpn-in-container/
   "Unauthorized".
 - All traffic is blocked if VPN disconnects (kill switch)
 - DNS queries go through the VPN (DNS-over-TLS)
-- Autoheal has read-only access to the Docker socket for health monitoring
+- Only `autoheal-proxy` mounts the Docker socket. The `:ro` on that mount does not limit the
+  API (a read-only mount does not stop connecting to a socket, and every API call, writes
+  included, goes over that connection); the proxy's allowlist does. Autoheal
+  can list containers and restart one by ID, and gets 403 for anything else, such as creating
+  a container, reading a container's environment (`GET /containers/<id>/json`), exec, stop or
+  kill. Restarts are not limited to this project: HAProxy cannot see labels, so a compromised
+  Autoheal could restart (not stop or change) any container on this host.
 
 ## Disclaimer
 
