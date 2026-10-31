@@ -43,6 +43,10 @@ PROXY_RULES = [
 ]
 VPN = "vpn"
 BEHIND_VPN = ("firefox", "qbittorrent", "qsticky")
+# The services the hardening options apply to. Autoheal is left out: its image is to be
+# replaced by a hardened local build.
+HARDENED = (VPN, *BEHIND_VPN, AUTOHEAL_PROXY)
+NO_NEW_PRIVILEGES = "no-new-privileges:true"
 
 
 def compose_config(env_file: Path = ENV_FILE, **variables: str | None) -> dict:
@@ -316,6 +320,13 @@ class ComposeTests(unittest.TestCase):
         environment = self.services["qsticky"].get("environment", {})
         self.assertEqual(environment.get("QBITTORRENT_HOST"), "localhost")
         self.assertEqual(self.services["qsticky"].get("network_mode"), f"service:{VPN}")
+
+    def test_hardened_services_cannot_gain_privileges(self):
+        # no-new-privileges: no setuid, setgid or file-capability binary can raise the
+        # privileges of a process (the images' init drops them with syscalls instead).
+        for name in HARDENED:
+            with self.subTest(service=name):
+                self.assertIn(NO_NEW_PRIVILEGES, self.services[name].get("security_opt", []))
 
     def test_firefox_cursor_size_matches_the_theme(self):
         size = self.services["firefox"].get("environment", {}).get("XCURSOR_SIZE")

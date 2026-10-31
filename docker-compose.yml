@@ -10,6 +10,10 @@ services:
     container_name: gluetun-vpn
     cap_add:
       - NET_ADMIN
+    # No setuid, setgid or file-capability binary can raise a process's privileges. Each
+    # image's init starts as root and drops to its user with syscalls, which this allows.
+    security_opt:
+      - no-new-privileges:true
     devices:
       - /dev/net/tun:/dev/net/tun
     # Loopback only: neither web UI has a password. Without a host IP, Docker binds every
@@ -128,6 +132,10 @@ services:
       # the image's shutdown script sends it)
       - ./config/firefox-profile/customKeys.json:/config/profile/customKeys.json:ro
     shm_size: "2gb"
+    # See vpn. The web server (nginx) loses its file capability, cap_net_bind_service, which
+    # only matters below port 1024: Docker sets net.ipv4.ip_unprivileged_port_start=0.
+    security_opt:
+      - no-new-privileges:true
     labels:
       # Opt-in marker for this project's autoheal instance (see autoheal service).
       # Scopes autoheal to these siblings only, never other stacks on this host.
@@ -165,6 +173,8 @@ services:
       - "PGID=${PGID:?Set PGID in .env (run: id -g)}"
       - TZ=${TZ:-America/New_York}
       - WEBUI_PORT=9080
+    security_opt:
+      - no-new-privileges:true  # see vpn
     volumes:
       # qBittorrent configuration
       - ./config/qbittorrent:/config
@@ -226,6 +236,8 @@ services:
       # Check interval
       - CHECK_INTERVAL=30
       - LOG_LEVEL=INFO
+    security_opt:
+      - no-new-privileges:true  # see vpn
     labels:
       # Opt-in marker for this project's autoheal instance (see autoheal service).
       # Scopes autoheal to these siblings only, never other stacks on this host.
