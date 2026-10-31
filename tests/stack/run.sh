@@ -5,7 +5,9 @@
 #   - every service runs the image docker-compose.yml pins, and is healthy
 #   - traffic from all three VPN-routed containers leaves through the VPN
 #     (same public IP, different from the host's), and the kill switch drops
-#     traffic forced around the tunnel
+#     TCP and ICMP forced around the tunnel (while the same probes through the
+#     tunnel get through); the firewall lets out of the bypassed interface only
+#     UDP to the WireGuard endpoint
 #   - DNS goes through Gluetun and resolves
 #   - Gluetun's forwarded port is qBittorrent's listening port, and qSticky
 #     restores it after it is changed
@@ -172,11 +174,25 @@ if [[ -n "$vpn_ip" && "$qbt_ip" == "$vpn_ip" && "$firefox_ip" == "$vpn_ip" ]]; t
 else
     fail "egress IPs: vpn '$vpn_ip', qbittorrent '$qbt_ip', firefox '$firefox_ip'"
 fi
-route=$(docker exec "$VPN" ip route get 1.1.1.1 2>&1 || true)
-if [[ "$route" == *" dev tun0 "* ]]; then
-    pass "default route goes through the tunnel (tun0)"
+# The tunnel interface as the running Gluetun names it (VPN_INTERFACE; the
+# image sets it, the WireGuard code default differs), and the interface the
+# tunnel bypasses: the one the main table's default route uses.
+tun_if=$(docker exec "$VPN" printenv VPN_INTERFACE 2>/dev/null || true)
+bypass_if=$(docker exec "$VPN" ip -o route show default table main 2>/dev/null |
+    awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}' || true)
+bypass_cidr=$(docker exec "$VPN" ip -o -4 addr show dev "${bypass_if:-none}" 2>/dev/null |
+    awk '{ print $4; exit }' || true)
+if [[ -n "$tun_if" ]] && docker exec "$VPN" ip link show dev "$tun_if" >/dev/null 2>&1 &&
+    [[ -n "$bypass_if" && "$bypass_if" != "$tun_if" && -n "$bypass_cidr" ]]; then
+    pass "tunnel interface $tun_if exists; the tunnel bypasses $bypass_if ($bypass_cidr)"
 else
-    fail "route to 1.1.1.1: $route"
+    fail "tunnel interface '$tun_if' or bypassed interface '$bypass_if' ('$bypass_cidr') not found"
+fi
+route=$(docker exec "$VPN" ip route get 1.1.1.1 2>&1 || true)
+if [[ -n "$tun_if" && "$route" == *" dev $tun_if "* ]]; then
+    pass "default route goes through the tunnel ($tun_if)"
+else
+    fail "route to 1.1.1.1 does not use '$tun_if': $route"
 fi
 # Capture before matching: grep -q exits early, and pipefail would then see a
 # broken pipe from the command feeding it.
@@ -186,10 +202,86 @@ if grep -qx -- '-P OUTPUT DROP' <<<"$output_rules"; then
 else
     fail "firewall OUTPUT policy is not DROP"
 fi
-if docker exec "$VPN" ping -c 1 -W 3 -I eth0 1.1.1.1 >/dev/null 2>&1; then
-    fail "kill switch: traffic forced out eth0 (around the tunnel) got through"
+# The WireGuard endpoint Gluetun connected to last (it logs each connection).
+endpoint=$(docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' "$VPN")" "$VPN" 2>&1 |
+    sed -n 's/.*\[wireguard\] Connecting to \([0-9.]*:[0-9]*\).*/\1/p' | tail -n 1 || true)
+# Every OUTPUT rule that accepts traffic must be one of: loopback, established
+# connections, the tunnel, the bypassed interface's own subnet, and UDP to the
+# WireGuard endpoint on the bypassed interface (which must be there). A rule
+# without -o applies to every interface, so it counts too.
+rules_verdict=$(python3 -I -c '
+import ipaddress, sys
+tun, eth, cidr, endpoint = sys.argv[1:]
+if not (tun and eth and cidr and ":" in endpoint):
+    sys.exit("FAIL missing input: tunnel %r, bypassed %r (%r), endpoint %r" % (tun, eth, cidr, endpoint))
+host, port = endpoint.rsplit(":", 1)
+iface = ipaddress.ip_interface(cidr)
+wireguard = f"-A OUTPUT -d {host}/32 -o {eth} -p udp -m udp --dport {port} -j ACCEPT"
+allowed = {
+    "-A OUTPUT -o lo -j ACCEPT",
+    "-A OUTPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+    f"-A OUTPUT -o {tun} -j ACCEPT",
+    f"-A OUTPUT -s {iface.ip}/32 -d {iface.network} -o {eth} -j ACCEPT",
+    wireguard,
+}
+rules = [line for line in sys.stdin.read().splitlines() if line.startswith("-A OUTPUT ")]
+unexpected = [r for r in rules if not r.endswith((" -j DROP", " -j REJECT")) and r not in allowed]
+if unexpected:
+    print("FAIL unexpected rule(s): " + " | ".join(unexpected))
+elif rules.count(wireguard) != 1:
+    print("FAIL no rule allowing UDP to the WireGuard endpoint " + endpoint)
+else:
+    print("OK")' "$tun_if" "$bypass_if" "$bypass_cidr" "$endpoint" <<<"$output_rules" 2>&1 || true)
+if [[ "$rules_verdict" == OK ]]; then
+    pass "firewall lets out $bypass_if only UDP to the WireGuard endpoint ($endpoint), besides local and established traffic"
 else
-    pass "kill switch: traffic forced out eth0 (around the tunnel) is dropped"
+    fail "firewall OUTPUT rules: ${rules_verdict#FAIL }"
+fi
+# The kill switch probes have a positive control: the same probe through the
+# tunnel must get through, or a failure around it would prove nothing (no
+# tool, no permission, the target unreachable).
+# Prints curl's exit code for HTTPS to 1.1.1.1 from qBittorrent (on the VPN's
+# network) bound to one interface: tcp_probe INTERFACE
+tcp_probe() {
+    local rc=0
+    docker exec "$QBT" curl -s -o /dev/null --max-time 5 --interface "$1" https://1.1.1.1/ \
+        >/dev/null 2>&1 || rc=$?
+    echo "$rc"
+}
+# Prints ping's exit code and output for one ICMP echo to 1.1.1.1 from Gluetun
+# out one interface: icmp_probe INTERFACE
+icmp_probe() {
+    local rc=0 output
+    output=$(docker exec "$VPN" ping -c 1 -W 3 -I "$1" 1.1.1.1 2>&1) || rc=$?
+    echo "$rc $(tr '\n' ' ' <<<"$output")"
+}
+tun_tcp=1
+for _ in 1 2 3; do
+    tun_tcp=$(tcp_probe "${tun_if:-none}")
+    [[ "$tun_tcp" == 0 ]] && break
+    sleep 2
+done
+bypass_tcp=$(tcp_probe "${bypass_if:-none}")
+if [[ "$tun_tcp" != 0 ]]; then
+    fail "kill switch (TCP): inconclusive, HTTPS to 1.1.1.1 through '$tun_if' failed too (curl exit $tun_tcp)"
+elif [[ "$bypass_tcp" == 7 || "$bypass_tcp" == 28 ]]; then
+    pass "kill switch (TCP): HTTPS to 1.1.1.1 forced out $bypass_if is dropped (curl exit $bypass_tcp), through $tun_if it gets through"
+else
+    fail "kill switch (TCP): HTTPS to 1.1.1.1 forced out '$bypass_if': curl exit $bypass_tcp (0: it got through)"
+fi
+tun_icmp="1"
+for _ in 1 2 3; do
+    tun_icmp=$(icmp_probe "${tun_if:-none}")
+    [[ "$tun_icmp" == "0 "* ]] && break
+    sleep 2
+done
+bypass_icmp=$(icmp_probe "${bypass_if:-none}")
+if [[ "$tun_icmp" != "0 "* ]]; then
+    fail "kill switch (ICMP): inconclusive, ping through '$tun_if' failed too: $tun_icmp"
+elif [[ "$bypass_icmp" == "1 "* && "$bypass_icmp" == *"Operation not permitted"* ]]; then
+    pass "kill switch (ICMP): ping forced out $bypass_if is refused by the firewall, through $tun_if it gets through"
+else
+    fail "kill switch (ICMP): ping forced out '$bypass_if': exit and output: $bypass_icmp"
 fi
 
 echo "== DNS"
