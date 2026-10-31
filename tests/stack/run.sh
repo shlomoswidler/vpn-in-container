@@ -21,7 +21,8 @@
 #     restores it after it is changed; Gluetun runs with only NET_ADMIN and
 #     NET_RAW, and still writes the port to its status file, as root's
 #   - Gluetun's control server refuses requests without the right API key, and
-#     with qSticky's valid key refuses (read-only) routes outside its role
+#     with qSticky's valid key refuses (read-only) routes outside its role; it
+#     reads that role from the file Compose writes from GLUETUN_API_KEY
 #   - qBittorrent's WebUI, API and settings, and the .torrent watch-folder
 #     hand-off (a private, tracker-less test torrent: no network contact)
 #   - qBittorrent's Host-header check (the DNS rebinding defense) refuses any
@@ -92,9 +93,11 @@ trap cleanup EXIT
 docker compose -f "$REPO/docker-compose.yml" config --format json > "$WORK/config.json"
 
 # Prints a value from the resolved compose config: compose_value SERVICE KEY
-# where KEY is "container", "image", "env:<NAME>", "mount:<target>" or
-# "build-label:<NAME>" (a label of the image the service builds). Prints
-# nothing for a service the file lacks (the checks on it then fail).
+# where KEY is "container", "image", "env:<NAME>", "mount:<target>",
+# "build-label:<NAME>" (a label of the image the service builds) or
+# "config-target:<NAME>" (where the top-level config NAME is put in the
+# container). Prints nothing for a service the file lacks (the checks on it
+# then fail).
 compose_value() {
     python3 -I - "$WORK/config.json" "$1" "$2" <<'EOF'
 import json, sys
@@ -110,6 +113,8 @@ elif key.startswith("mount:"):
     print(next(v["source"] for v in svc.get("volumes", []) if v["target"] == key[6:]))
 elif key.startswith("build-label:"):
     print(svc.get("build", {}).get("labels", {}).get(key[12:], ""))
+elif key.startswith("config-target:"):
+    print(next((c.get("target", "") for c in svc.get("configs", []) if c.get("source") == key[14:]), ""))
 EOF
 }
 
@@ -735,6 +740,24 @@ for route in /v1/publicip/ip /v1/dns/status /v1/vpn/settings /v1/updater/status 
         fail "Gluetun control server answered $route (outside qSticky's role) with its valid API key: HTTP $code"
     fi
 done
+# Those roles come from the auth file Compose writes into the container from
+# .env's GLUETUN_API_KEY (configs: gluetun_auth): the path Gluetun's startup
+# summary names must be that file, and Gluetun must have read its one role.
+auth_file=$(compose_value vpn config-target:gluetun_auth)
+vpn_log=$(docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' "$VPN")" "$VPN" 2>&1 || true)
+auth_summary=$(sed -n 's/.*Authentication file path: //p' <<<"$vpn_log" | tail -n 1)
+if [[ -n "$auth_file" && "$auth_summary" == "$auth_file" ]] &&
+    grep -q 'read 1 roles from authentication file' <<<"$vpn_log"; then
+    pass "Gluetun read 1 role from $auth_file, the file Compose writes from GLUETUN_API_KEY"
+else
+    fail "Gluetun's auth file is '$auth_summary', Compose writes '$auth_file'; read 1 role: $(grep -c 'read 1 roles from authentication file' <<<"$vpn_log")"
+fi
+auth_file_mode=$(docker exec "$VPN" stat -c '%a %u:%g' "${auth_file:-none}" 2>&1 || true)
+if [[ "$auth_file_mode" == "400 0:0" ]]; then
+    pass "$auth_file is root's and only root may read it (400 0:0)"
+else
+    fail "Gluetun's auth file '$auth_file': $auth_file_mode (want 400 0:0)"
+fi
 forwarded=$(docker exec -e GLUETUN_API_KEY "$QBT" sh -c \
     'curl -s --max-time 10 -H "X-API-Key: $GLUETUN_API_KEY" http://localhost:8000/v1/portforward' \
     2>/dev/null | json_get port 2>/dev/null || echo 0)

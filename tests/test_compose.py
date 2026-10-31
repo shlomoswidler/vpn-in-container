@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -93,6 +94,13 @@ GLUETUN_STATUS_FILE_VARIABLES = (
     "PRIVATE_INTERNET_ACCESS_VPN_PORT_FORWARDING_STATUS_FILE",
     "PUBLICIP_FILE",
     "IP_STATUS_FILE",
+)
+# Gluetun's control-server roles: one, qSticky's, rendered by Compose from GLUETUN_API_KEY
+# (configs: gluetun_auth), and the only routes it may call.
+GLUETUN_AUTH_CONFIG = "gluetun_auth"
+QSTICKY_ROUTES = ["GET /v1/portforward", "GET /v1/vpn/status"]
+GLUETUN_API_KEY_GUARD = (
+    "required variable GLUETUN_API_KEY is missing a value: Set GLUETUN_API_KEY in .env"
 )
 # How much longer than the longest stop timeout Autoheal's curl must wait for a restart's
 # answer: the restart also starts the container again.
@@ -235,6 +243,21 @@ class EnvExampleTests(unittest.TestCase):
         self.assertIn("required variable PUID is missing a value: Set PUID in .env", result.stderr)
         self.assertIn("required variable PGID is missing a value: Set PGID in .env", result.stderr)
 
+    def test_gluetun_api_key_guard_fires_when_empty_or_unset(self):
+        # Without it, Compose would render an auth file with an empty key, and qSticky would
+        # send one.
+        env = {**self.env, "PUID": str(os.getuid()), "PGID": str(os.getgid())}
+        result = run_compose_config(ENV_FILE, {**env, "GLUETUN_API_KEY": ""})
+        self.assertNotEqual(result.returncode, 0, "config passed with GLUETUN_API_KEY empty")
+        self.assertIn(GLUETUN_API_KEY_GUARD, result.stderr)
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / ".env"
+            env_file.write_text("COMPOSE_PROJECT_NAME=vpn-in-container\n")
+            env.pop("GLUETUN_API_KEY", None)
+            result = run_compose_config(env_file, env)
+        self.assertNotEqual(result.returncode, 0, "config passed with GLUETUN_API_KEY unset")
+        self.assertIn(GLUETUN_API_KEY_GUARD, result.stderr)
+
     def test_no_value_carries_an_inline_comment(self):
         # Compose strips leading spaces from an unquoted value and then removes only a comment
         # preceded by a space, so `PUID=   # Run: id -u` sets PUID to "# Run: id -u". Comments
@@ -253,6 +276,8 @@ class DownloadsPathTests(unittest.TestCase):
     EXAMPLE = "# DOWNLOADS_PATH=${HOME}/Downloads/vpn-in-container"
 
     def mounts(self, env_file: Path, **variables: str | None) -> dict[str, str]:
+        # The env files below set only what is tested; the compose file requires a key.
+        variables = {"GLUETUN_API_KEY": "test-key", **variables}
         services = compose_config(env_file, **variables)["services"]
         found = {}
         for name, target in (
@@ -294,6 +319,8 @@ class QstickyPasswordTests(unittest.TestCase):
     """QBITTORRENT_PASS is only what qSticky sends when it logs in: optional, no default."""
 
     def password(self, env_file: Path, **variables: str | None) -> str | None:
+        # The env files below set only what is tested; the compose file requires a key.
+        variables = {"GLUETUN_API_KEY": "test-key", **variables}
         config = compose_config(env_file, **variables)
         return config["services"]["qsticky"].get("environment", {}).get("QBITTORRENT_PASS")
 
@@ -519,6 +546,40 @@ class ComposeTests(unittest.TestCase):
                 path = environment.get(name)
                 if path is not None:
                     self.assertTrue(path.startswith(f"{GLUETUN_STATUS_DIR}/"), path)
+
+    def test_gluetun_auth_file_holds_only_qstickys_role_with_its_key(self):
+        # One copy of the key: .env's GLUETUN_API_KEY, which Compose puts in both qSticky's
+        # environment and the auth file it writes for Gluetun.
+        content = self.config.get("configs", {}).get(GLUETUN_AUTH_CONFIG, {}).get("content")
+        self.assertIsNotNone(content, f"no top-level config {GLUETUN_AUTH_CONFIG} with content")
+        auth = tomllib.loads(content)
+        self.assertEqual(set(auth), {"roles"})
+        self.assertEqual(len(auth["roles"]), 1, auth["roles"])
+        role = auth["roles"][0]
+        self.assertEqual(set(role), {"name", "routes", "auth", "apikey"})
+        self.assertEqual(role["auth"], "apikey")
+        # Not the settings routes (they include the WireGuard private key) and no PUT.
+        self.assertEqual(role["routes"], QSTICKY_ROUTES)
+        qsticky = self.services["qsticky"].get("environment", {})
+        self.assertEqual(qsticky.get("GLUETUN_AUTH_TYPE"), "apikey")
+        self.assertTrue(role["apikey"], "empty API key")
+        self.assertEqual(role["apikey"], qsticky.get("GLUETUN_APIKEY"))
+
+    def test_gluetun_reads_the_auth_file_compose_writes(self):
+        vpn = self.services[VPN]
+        configs = [c for c in vpn.get("configs", []) if c.get("source") == GLUETUN_AUTH_CONFIG]
+        self.assertEqual(len(configs), 1, vpn.get("configs"))
+        target = configs[0].get("target", "")
+        path = vpn.get("environment", {}).get("HTTP_CONTROL_SERVER_AUTH_CONFIG_FILEPATH")
+        self.assertEqual(path, target)
+        # Only root may read it (Gluetun runs as root).
+        self.assertEqual(configs[0].get("mode"), "0400")
+        # Not inside a mount: Compose copies the file into the container, and inside the
+        # ./config/gluetun bind mount (/gluetun) the key would land in that host folder.
+        for volume in vpn.get("volumes", []):
+            with self.subTest(volume=volume.get("target")):
+                mount = volume.get("target", "").rstrip("/")
+                self.assertFalse(target == mount or target.startswith(f"{mount}/"), target)
 
     def test_hardened_services_have_pid_and_memory_limits(self):
         for name in HARDENED:

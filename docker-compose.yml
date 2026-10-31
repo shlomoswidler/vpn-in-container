@@ -80,16 +80,25 @@ services:
       - VPN_PORT_FORWARDING_PROVIDER=protonvpn
       # Control server for qSticky
       - HTTP_CONTROL_SERVER_ADDRESS=:8000
-      # Our auth file (API key roles for qSticky) is config/gluetun/config.toml, mounted at
-      # /gluetun/config.toml; Gluetun's default path is /gluetun/auth/config.toml, which would
-      # leave every route unauthenticated.
-      - HTTP_CONTROL_SERVER_AUTH_CONFIG_FILEPATH=/gluetun/config.toml
+      # qSticky's role, which Compose writes from .env (configs: gluetun_auth, below). Not
+      # Gluetun's default, /gluetun/auth/config.toml: /gluetun is the ./config/gluetun bind
+      # mount, and Compose would write the key into that host folder.
+      - HTTP_CONTROL_SERVER_AUTH_CONFIG_FILEPATH=/run/secrets/gluetun_auth.toml
       # Firewall/Kill switch
       - FIREWALL=on
       # Timezone
       - TZ=${TZ:-America/New_York}
     volumes:
+      # Gluetun's server list (servers.json), which it rewrites at start
       - ./config/gluetun:/gluetun
+    # Copied in by Compose each time it starts the container (up and start, not restart), as
+    # root's and readable only by root. Compose does not recreate a container when only the
+    # content changes: a new GLUETUN_API_KEY reaches Gluetun only with
+    # `docker compose up -d --force-recreate vpn qsticky` (README.md, Changing the API Key).
+    configs:
+      - source: gluetun_auth
+        target: /run/secrets/gluetun_auth.toml
+        mode: 0400
     labels:
       # Opt-in marker for this project's autoheal instance (see autoheal service).
       # Scopes autoheal to these siblings only, never other stacks on this host.
@@ -350,7 +359,7 @@ services:
       - GLUETUN_HOST=localhost
       - GLUETUN_PORT=8000
       - GLUETUN_AUTH_TYPE=apikey
-      - GLUETUN_APIKEY=${GLUETUN_API_KEY}
+      - "GLUETUN_APIKEY=${GLUETUN_API_KEY:?Set GLUETUN_API_KEY in .env (run: openssl rand -hex 32)}"
       # Check interval
       - CHECK_INTERVAL=30
       - LOG_LEVEL=INFO
@@ -509,3 +518,17 @@ networks:
   # Only autoheal and its proxy: no route out, nothing published.
   autoheal-docker:
     internal: true
+
+# Gluetun's control-server roles, written from .env: GLUETUN_API_KEY is the only copy of the key
+# (qSticky gets it in its environment). With it, qSticky may read the forwarded port and the
+# VPN status, nothing else: no settings (they include the WireGuard private key) and no PUT.
+# The key goes into a TOML string, so it must not contain " or \ (openssl rand -hex 32 never
+# does).
+configs:
+  gluetun_auth:
+    content: |
+      [[roles]]
+      name = "qsticky"
+      routes = ["GET /v1/portforward", "GET /v1/vpn/status"]
+      auth = "apikey"
+      apikey = "${GLUETUN_API_KEY:?Set GLUETUN_API_KEY in .env (run: openssl rand -hex 32)}"

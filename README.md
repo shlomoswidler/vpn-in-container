@@ -67,9 +67,9 @@ A Docker Compose stack providing a privacy-focused, containerized browsing envir
 # Copy the template
 cp .env.example .env
 
-# Generate a random API key for Gluetun control server
+# Generate a random API key for Gluetun's control server
 openssl rand -hex 32
-# Copy this value for the next step
+# Put this value in GLUETUN_API_KEY
 
 # Edit .env with your values
 nano .env  # or use your preferred editor
@@ -77,29 +77,19 @@ nano .env  # or use your preferred editor
 
 Fill in these required values:
 - `WIREGUARD_PRIVATE_KEY`: Your ProtonVPN WireGuard private key
-- `GLUETUN_API_KEY`: The random key you generated above
+- `GLUETUN_API_KEY`: The random key you generated above. It is the only copy: Compose writes
+  Gluetun's auth file from it and gives it to qSticky (see [Changing the API
+  Key](#changing-the-api-key))
 - `PUID` and `PGID`: the output of `id -u` and `id -g` (`docker compose` refuses to start without
   them; `./start.sh` fills them in when they are empty)
 
 > **Note:** The `.env.example` includes `COMPOSE_PROJECT_NAME=vpn-in-container`. Do not remove this — it prevents Docker Compose from normalizing hyphens to underscores in volume mount paths, which would break all container configurations. See [Troubleshooting](#containers-start-with-empty-config--wrong-mount-paths) for details.
 
-### 3. Update Gluetun Config
+> **Upgrading from an earlier version:** the API key used to be kept a second time, in
+> `config/gluetun/config.toml`. That file is no longer read, but it still holds the key in plain
+> text: delete it (`rm config/gluetun/config.toml`).
 
-```bash
-cp config/gluetun/config.toml.example config/gluetun/config.toml
-```
-
-Edit `config/gluetun/config.toml` and replace `REPLACE_WITH_GLUETUN_API_KEY` with the same API key from step 2:
-
-```toml
-[[roles]]
-name = "qsticky"
-routes = ["GET /v1/portforward", "GET /v1/vpn/status"]
-auth = "apikey"
-apikey = "your_actual_api_key_here"
-```
-
-### 4. Create Downloads Directory
+### 3. Create Downloads Directory
 
 Torrents go to `~/Downloads/vpn-in-container`, and Firefox's downloads (including `.torrent` files
 for qBittorrent) to its `downloads/` subfolder. To use another folder, set `DOWNLOADS_PATH` in
@@ -109,13 +99,13 @@ for qBittorrent) to its `downloads/` subfolder. To use another folder, set `DOWN
 mkdir -p "$HOME/Downloads/vpn-in-container/downloads"
 ```
 
-### 5. Start the Stack
+### 4. Start the Stack
 
 ```bash
 docker compose up -d
 ```
 
-### 6. Verify qBittorrent
+### 5. Verify qBittorrent
 
 Open qBittorrent at `http://localhost:9080` - **no login required** from your host machine.
 
@@ -243,6 +233,27 @@ Logs are rotated: each service keeps at most three 10 MB files (`x-logging` in
 `docker-compose.yml`), whatever the Docker host's default is. `docker compose logs` reads the
 older files too. Changing the setting takes effect when a container is recreated
 (`docker compose up -d` after the edit).
+
+### Changing the API Key
+
+`GLUETUN_API_KEY` in `.env` is the only copy of the key. Compose writes Gluetun's auth file from it
+(`configs: gluetun_auth` in `docker-compose.yml`; `/run/secrets/gluetun_auth.toml` in the
+container, readable only by root), with one role: qSticky may read the forwarded port and the VPN
+status, nothing else. qSticky gets the key in its environment. After changing it:
+
+```bash
+docker compose up -d --force-recreate vpn qsticky
+docker compose up -d
+```
+
+`--force-recreate` is needed because Compose decides whether to recreate a container from the
+service's settings, which name the auth file but do not include its content. A plain
+`docker compose up -d` would recreate qSticky, whose environment changed, but leave Gluetun on the
+old key: qSticky would get 401 from Gluetun and stop syncing the forwarded port.
+`docker compose restart vpn` does not apply it either: Compose copies the file in only when it
+starts a container (`up`, `start`). The second, plain `up -d` recreates Firefox: naming services
+selects them and what they depend on, not what depends on them, so the first command leaves
+Firefox on the removed Gluetun container's network, where it cannot start again.
 
 ## Self-Healing & Sleep/Reboot Recovery
 
@@ -541,9 +552,7 @@ vpn-in-container/
 │   │   ├── README.md       # How native cursors work; upgrading the image
 │   │   ├── generate_native_theme.py  # Generates native-css/
 │   │   └── native-css/     # Marker cursor theme (shows your OS's native cursors)
-│   ├── gluetun/
-│   │   ├── config.toml.example  # Template for API authentication
-│   │   └── config.toml          # Your API key (gitignored)
+│   ├── gluetun/            # Gluetun's server list, servers.json (gitignored)
 │   ├── firefox/            # Browser profile (gitignored)
 │   ├── firefox-autoconfig/
 │   │   ├── autoconfig.js   # Loads single-window.cfg (Firefox autoconfig)
