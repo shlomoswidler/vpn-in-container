@@ -127,7 +127,9 @@ All settings are automatically configured by the init script:
 ## Start and Stop
 
 ```bash
-# Start containers and open web interfaces
+# Start containers, wait until all are healthy (up to 5 minutes), then open the web interfaces.
+# Uses PUID/PGID from your environment or .env; only if neither sets them, your own IDs.
+# Exits with an error, and shows each service's state, if any service is not healthy in time.
 ./start.sh
 
 # Or start manually without opening browser
