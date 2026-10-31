@@ -234,6 +234,11 @@ docker compose ps
 docker compose logs autoheal
 ```
 
+Logs are rotated: each service but Autoheal keeps at most three 10 MB files (`x-logging` in
+`docker-compose.yml`), whatever the Docker host's default is. `docker compose logs` reads the
+older files too. Changing the setting takes effect when a container is recreated
+(`docker compose up -d` after the edit).
+
 ## Self-Healing & Sleep/Reboot Recovery
 
 The stack automatically recovers from host sleep, reboot, or VPN disconnects using two layers:

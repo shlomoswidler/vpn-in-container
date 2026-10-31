@@ -47,6 +47,8 @@ BEHIND_VPN = ("firefox", "qbittorrent", "qsticky")
 # replaced by a hardened local build.
 HARDENED = (VPN, *BEHIND_VPN, AUTOHEAL_PROXY)
 NO_NEW_PRIVILEGES = "no-new-privileges:true"
+# Every hardened service's logging: json-file, rotated at 10 MB, three files kept.
+LOGGING = {"driver": "json-file", "options": {"max-size": "10m", "max-file": "3"}}
 # Each hardened service drops every capability and adds back only these, the set its image
 # was measured to need (docker-compose.yml says what each is for).
 CAPABILITIES = {
@@ -360,6 +362,13 @@ class ComposeTests(unittest.TestCase):
         self.assertGreaterEqual(
             int(firefox.get("mem_limit", 0)), 3 * int(firefox.get("shm_size", 0))
         )
+
+    def test_hardened_services_rotate_their_logs(self):
+        # Explicit, not the daemon's default: a stock Docker Engine keeps json-file logs
+        # without limit. One definition (x-logging) for all.
+        for name in HARDENED:
+            with self.subTest(service=name):
+                self.assertEqual(self.services[name].get("logging"), LOGGING)
 
     def test_firefox_cursor_size_matches_the_theme(self):
         size = self.services["firefox"].get("environment", {}).get("XCURSOR_SIZE")
