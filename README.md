@@ -174,7 +174,12 @@ Sound from Firefox in the container plays in the browser tab that shows the web 
    storage for localhost:5800). After every page load your browser still blocks sound until
    you interact with the page (its autoplay policy), so sound comes back at your first click
    or tap in the web UI. Keystrokes don't count.
-3. **Sites in the container:** Firefox there keeps its default autoplay setting (block
+3. **After a reconnect, nothing:** when the container restarts (Autoheal restarting Gluetun
+   restarts Firefox with it) and the open tab reconnects, sound comes back on by itself, or
+   stays off if you had muted it. The image's web UI leaves it off until you click the
+   speaker icon again; `config/novnc/ui.js` (the image's `app/ui.js` plus `ui.js.patch`,
+   mounted over it) fixes that.
+4. **Sites in the container:** Firefox there keeps its default autoplay setting (block
    audible autoplay): a site plays sound once you click in it, on a play button for
    example. Your clicks reach Firefox as real input, so nothing else is needed.
 
@@ -200,7 +205,9 @@ What is tested automatically (see [Automated Tests](#automated-tests)), and what
   before a gesture, then decoding the stream on the right channels at the set volume); and
   the whole path through the real web UI of such a container, measured at the web UI's own
   audio output: no sound before a gesture, the speaker icon on first use, the first click
-  on a later visit, and the tone from the container's page.
+  on a later visit, and the tone from the container's page; then, with no click, sound
+  coming back after the container restarts and the same tab reconnects, and staying off
+  after such a restart if it was muted.
 - **Manual: actually hearing it.** The last step, from the browser to your Mac's speakers
   (the output device, the system volume, the tab not muted), and Safari, are not tested.
   Check once after setting up or upgrading: open http://localhost:5800, open the side panel,
@@ -392,7 +399,7 @@ tests/e2e/run.sh       # Firefox in throwaway containers: cursors, single window
                        # downloads, WebRTC, sound to the web UI's audio stream
 tests/browser/run.sh   # the web UI in headless Chrome and Firefox: the patched noVNC cursor,
                        # the audio player, and sound through the real web UI of a throwaway
-                       # container
+                       # container, also across a restart of it
 tests/stack/recovery.sh        # DISRUPTIVE: restarts the VPN container and times the recovery
 tests/qbittorrent/download.sh  # a real multi-file download between two throwaway qBittorrent
                                # containers (no internet), checked by SHA-256 and recheck
@@ -627,6 +634,8 @@ vpn-in-container/
 │   │   └── policies.json   # Installs Torrent Control, allowed in private windows
 │   ├── novnc/
 │   │   ├── cursor.js       # Patched noVNC cursor: shows native cursors
+│   │   ├── ui.js           # Patched web UI: sound comes back after a reconnect
+│   │   ├── *.patch, *.upstream.sha256  # How cursor.js and ui.js differ from the image's
 │   │   ├── cursor-keyword.js  # Recognizes marker cursors and Openbox's core glyphs
 │   │   ├── core-glyphs.js  # Openbox's 11 core glyphs as the VNC server sends them
 │   │   └── core-glyphs/capture.sh  # Regenerates core-glyphs.js from the pinned image

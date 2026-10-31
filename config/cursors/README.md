@@ -80,50 +80,61 @@ tests/e2e/run.sh       # real Firefox + VNC server: markers, prefs, Openbox drag
 tests/browser/run.sh   # the image's noVNC with the patch, in headless Chrome and Firefox
 ```
 
-### The patched cursor.js
+### The patched noVNC files: cursor.js and ui.js
 
-The firefox service mounts `config/novnc/cursor.js` over the image's
-`/opt/noVNC/core/util/cursor.js`, so it would hide whatever a new image changed
-in that file. Three files record how the overlay was made:
+The firefox service mounts two patched files over the image's noVNC:
+`config/novnc/cursor.js` over `/opt/noVNC/core/util/cursor.js` (native cursors),
+and `config/novnc/ui.js` over `/opt/noVNC/app/ui.js` (the web UI: sound comes
+back on after the tab reconnects, see the main README's Sound section). Each
+would hide whatever a new image changed in that file. For each, three files
+record how the overlay was made:
 
-- `config/novnc/cursor.js.upstream.sha256`: the checksum of the image's file
-  (noVNC v1.6.0's and v1.7.0's, unchanged; jlesage/firefox v26.09.1 ships it).
-- `config/novnc/cursor.js.patch`: the change, as `diff -u` output. It adds the
-  `nativeCursorKeyword` import from `cursor-keyword.js` and the keyword check at
-  the top of `Cursor.change()`, and removes nothing.
-- `config/novnc/cursor.js`: the image's file plus the patch.
+- `config/novnc/NAME.upstream.sha256`: the checksum of the image's file. For
+  `cursor.js`, noVNC v1.6.0's and v1.7.0's, unchanged; for `ui.js`, the base
+  image's (jlesage/docker-baseimage-gui) own web UI. jlesage/firefox v26.09.1
+  ships both.
+- `config/novnc/NAME.patch`: the change, as `diff -u` output. Neither removes
+  anything. `cursor.js.patch` adds the `nativeCursorKeyword` import from
+  `cursor-keyword.js` and the keyword check at the top of `Cursor.change()`.
+  `ui.js.patch` adds, in `connectFinished()`, an `else` branch to the
+  first-interaction audio check: once the first interaction is handled, a
+  reconnect calls `UI.updateAudioVolume()`, which turns audio back on unless the
+  volume slider is at 0 (muted). `disconnectFinished()` turns audio off but
+  leaves the slider and the saved `audio_enabled` setting as they were.
+- `config/novnc/NAME`: the image's file plus the patch.
 
-`tests/browser/run.sh` and `tests/e2e/run.sh` copy the image's own file out of a
-container that is never started (no mount covers it) and stop with a `FAIL`
-line if its checksum is not the recorded one, or if the patch does not turn it
-into `config/novnc/cursor.js` exactly (`tests/novnc_cursor_patch.py`). The unit
-tests check the second part without the image: taking the patch back out of
-`config/novnc/cursor.js` must give a file with the recorded checksum. So
-`config/novnc/cursor.js` cannot be edited without updating the patch.
+`tests/browser/run.sh` and `tests/e2e/run.sh` copy the image's own files out of
+a container that is never started (no mount covers them) and stop with a `FAIL`
+line if a checksum is not the recorded one, or if a patch does not turn its
+file into the overlay exactly (`tests/novnc_patch.py`). The unit tests check the
+second part without the image: taking each patch back out of its overlay must
+give a file with the recorded checksum. So neither overlay can be edited
+without updating its patch.
 
-If the new image's `cursor.js` changed, re-apply the patch to it, review the
-result, and record the new file. From the repository root, after changing the
-image in `docker-compose.yml`:
+If a new image's file changed, re-apply the patch to it, review the result, and
+record the new file. From the repository root, after changing the image in
+`docker-compose.yml`, with `name=cursor.js path=core/util/cursor.js` or
+`name=ui.js path=app/ui.js`:
 
 ```bash
 IMAGE=$(docker compose config --format json | python3 -I -c \
     'import json, sys; print(json.load(sys.stdin)["services"]["firefox"]["image"])')
 dir=$(mktemp -d)
 container=$(docker create "$IMAGE")
-docker cp "$container:/opt/noVNC/core/util/cursor.js" "$dir/cursor.js"
+docker cp "$container:/opt/noVNC/$path" "$dir/$name"
 docker rm "$container"
 # What upstream changed: the old file is the overlay with the patch taken back out.
-patch -R -s -o "$dir/old-cursor.js" config/novnc/cursor.js config/novnc/cursor.js.patch
-diff -u "$dir/old-cursor.js" "$dir/cursor.js"
-patch -o config/novnc/cursor.js "$dir/cursor.js" config/novnc/cursor.js.patch
-# Resolve any rejected hunk by hand in config/novnc/cursor.js, then record both files:
-diff -u --label a/core/util/cursor.js --label b/core/util/cursor.js \
-    "$dir/cursor.js" config/novnc/cursor.js > config/novnc/cursor.js.patch
-printf '%s  core/util/cursor.js\n' "$(shasum -a 256 < "$dir/cursor.js" | cut -d' ' -f1)" \
-    > config/novnc/cursor.js.upstream.sha256
+patch -R -s -o "$dir/old-$name" "config/novnc/$name" "config/novnc/$name.patch"
+diff -u "$dir/old-$name" "$dir/$name"
+patch -o "config/novnc/$name" "$dir/$name" "config/novnc/$name.patch"
+# Resolve any rejected hunk by hand in config/novnc/$name, then record both files:
+diff -u --label "a/$path" --label "b/$path" \
+    "$dir/$name" "config/novnc/$name" > "config/novnc/$name.patch"
+printf '%s  %s\n' "$(shasum -a 256 < "$dir/$name" | cut -d' ' -f1)" "$path" \
+    > "config/novnc/$name.upstream.sha256"
 python3 -m unittest discover -s tests && tests/browser/run.sh && tests/e2e/run.sh
 ```
 
 (`diff` exits 1 when the files differ, which they do.) noVNC is licensed under
-the Mozilla Public License 2.0: `config/novnc/cursor.js` and its patch stay
-under it, as the file's header says.
+the Mozilla Public License 2.0: `config/novnc/cursor.js`, `config/novnc/ui.js`
+and their patches stay under it, as the files' headers say.

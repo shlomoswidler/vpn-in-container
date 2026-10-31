@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""Check that config/novnc/cursor.js is the image's noVNC cursor.js plus cursor.js.patch.
+"""Check that each patched noVNC file in config/novnc is the image's file plus its patch.
 
 The firefox service mounts config/novnc/cursor.js over the image's
-/opt/noVNC/core/util/cursor.js, so a new image's version of that file would be hidden, with
-its fixes. config/novnc/cursor.js.upstream.sha256 records the checksum of the file the
-overlay was made from, and config/novnc/cursor.js.patch the change (`diff -u` output).
+/opt/noVNC/core/util/cursor.js, and config/novnc/ui.js over /opt/noVNC/app/ui.js, so a new
+image's version of either file would be hidden, with its fixes. For each, NAME.upstream.sha256
+records the checksum of the file the overlay was made from, and NAME.patch the change
+(`diff -u` output).
 
-Given the image's file (copied out of the image with `docker create` and `docker cp`), this
-exits 0 if it has the recorded checksum and the patch turns it into config/novnc/cursor.js;
-otherwise it says which and exits 1. The patch is applied strictly: every hunk must match
-exactly where it says, with no offset and no fuzz (unlike `patch`). The unit tests
-(tests/test_novnc_cursor_patch.py) check the overlay without the image's file, by taking the
-patch back out of it. config/cursors/README.md says how to update all three files.
+Given a directory with the image's files at their paths under /opt/noVNC (copied out of the
+image with `docker create` and `docker cp`), this exits 0 if each has the recorded checksum and
+its patch turns it into the overlay; otherwise it says which and exits 1. A patch is applied
+strictly: every hunk must match exactly where it says, with no offset and no fuzz (unlike
+`patch`). The unit tests (tests/test_novnc_patch.py) check the overlays without the image's
+files, by taking each patch back out of its overlay. config/cursors/README.md says how to
+update the three files of an overlay.
 
-Usage: python3 -I tests/novnc_cursor_patch.py IMAGE_CURSOR_JS
+Usage: python3 -I tests/novnc_patch.py IMAGE_NOVNC_DIR
 """
 
 import hashlib
@@ -24,16 +26,37 @@ from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 NOVNC_DIR = REPO_ROOT / "config" / "novnc"
-OVERLAY = NOVNC_DIR / "cursor.js"
-PATCH_FILE = NOVNC_DIR / "cursor.js.patch"
-CHECKSUM_FILE = NOVNC_DIR / "cursor.js.upstream.sha256"
-# One `sha256sum` line: the digest, two spaces, the file's path under /opt/noVNC.
-CHECKSUM_LINE = re.compile(r"\A([0-9a-f]{64})  core/util/cursor\.js\n\Z")
+README = "config/cursors/README.md"
 HUNK_HEADER = re.compile(rb"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?\n\Z")
 
 
 class PatchError(Exception):
     """The patch cannot be read, or does not apply, or gives the wrong file."""
+
+
+class Overlay(NamedTuple):
+    """A patched noVNC file: config/novnc/NAME, mounted over /opt/noVNC/IMAGE_PATH."""
+
+    name: str
+    image_path: str
+
+    @property
+    def path(self) -> Path:
+        return NOVNC_DIR / self.name
+
+    @property
+    def patch_file(self) -> Path:
+        return NOVNC_DIR / f"{self.name}.patch"
+
+    @property
+    def checksum_file(self) -> Path:
+        return NOVNC_DIR / f"{self.name}.upstream.sha256"
+
+
+OVERLAYS = (
+    Overlay("cursor.js", "core/util/cursor.js"),
+    Overlay("ui.js", "app/ui.js"),
+)
 
 
 class Hunk(NamedTuple):
@@ -140,11 +163,15 @@ def apply_patch(data: bytes, hunks: list[Hunk], reverse: bool = False) -> bytes:
     return b"".join(result)
 
 
-def recorded_sha256() -> str:
-    """The checksum in CHECKSUM_FILE; raise PatchError if the file is not one such line."""
-    line = CHECKSUM_LINE.match(CHECKSUM_FILE.read_text())
+def recorded_sha256(overlay: Overlay) -> str:
+    """The checksum in OVERLAY's checksum file; raise PatchError if it is not one such line."""
+    # One `sha256sum` line: the digest, two spaces, the file's path under /opt/noVNC.
+    pattern = re.compile(rf"\A([0-9a-f]{{64}})  {re.escape(overlay.image_path)}\n\Z")
+    line = pattern.match(overlay.checksum_file.read_text())
     if not line:
-        raise PatchError(f"{CHECKSUM_FILE} is not one `<sha256>  core/util/cursor.js` line")
+        raise PatchError(
+            f"{overlay.checksum_file} is not one `<sha256>  {overlay.image_path}` line"
+        )
     return line.group(1)
 
 
@@ -163,29 +190,30 @@ def original_of(overlay: bytes, patch: bytes, sha256: str) -> bytes:
     return original
 
 
-def check_image_file(image_file: Path) -> list[str]:
-    """What is wrong with IMAGE_FILE (the image's cursor.js) and the overlay; [] if nothing."""
+def check_image_file(overlay: Overlay, image_file: Path) -> list[str]:
+    """What is wrong with IMAGE_FILE (the image's file) and OVERLAY; [] if nothing."""
     try:
         original = image_file.read_bytes()
     except OSError as err:
-        return [f"cannot read the image's cursor.js: {err}"]
+        return [f"cannot read the image's {overlay.image_path}: {err}"]
+    patch_file = overlay.patch_file.relative_to(REPO_ROOT)
     try:
-        recorded = recorded_sha256()
+        recorded = recorded_sha256(overlay)
         actual = hashlib.sha256(original).hexdigest()
         if actual != recorded:
             changed = (
-                f"the image's noVNC core/util/cursor.js changed (sha256 {actual}, recorded "
-                f"{recorded} in {CHECKSUM_FILE.relative_to(REPO_ROOT)}): re-apply "
-                f"{PATCH_FILE.relative_to(REPO_ROOT)} to it, as config/cursors/README.md says"
+                f"the image's noVNC {overlay.image_path} changed (sha256 {actual}, recorded "
+                f"{recorded} in {overlay.checksum_file.relative_to(REPO_ROOT)}): re-apply "
+                f"{patch_file} to it, as {README} says"
             )
             return [changed]
-        patched = apply_patch(original, parse_patch(PATCH_FILE.read_bytes()))
+        patched = apply_patch(original, parse_patch(overlay.patch_file.read_bytes()))
     except (OSError, PatchError) as err:
-        return [str(err)]
-    if patched != OVERLAY.read_bytes():
+        return [f"{overlay.name}: {err}"]
+    if patched != overlay.path.read_bytes():
         mismatch = (
-            f"{OVERLAY.relative_to(REPO_ROOT)} is not the image's cursor.js plus "
-            f"{PATCH_FILE.relative_to(REPO_ROOT)}"
+            f"{overlay.path.relative_to(REPO_ROOT)} is not the image's {overlay.image_path} "
+            f"plus {patch_file}"
         )
         return [mismatch]
     return []
@@ -193,18 +221,23 @@ def check_image_file(image_file: Path) -> list[str]:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
-        print(f"usage: {argv[0]} IMAGE_CURSOR_JS", file=sys.stderr)
+        print(f"usage: {argv[0]} IMAGE_NOVNC_DIR", file=sys.stderr)
         return 2
-    problems = check_image_file(Path(argv[1]))
-    for problem in problems:
-        print(f"FAIL  {problem}", file=sys.stderr)
-    if problems:
-        return 1
-    print(
-        f"ok    the image's noVNC cursor.js is the recorded one (sha256 {recorded_sha256()}), "
-        f"and {OVERLAY.relative_to(REPO_ROOT)} is it plus {PATCH_FILE.relative_to(REPO_ROOT)}"
-    )
-    return 0
+    image_dir = Path(argv[1])
+    failed = False
+    for overlay in OVERLAYS:
+        problems = check_image_file(overlay, image_dir / overlay.image_path)
+        for problem in problems:
+            print(f"FAIL  {problem}", file=sys.stderr)
+        if problems:
+            failed = True
+            continue
+        print(
+            f"ok    the image's noVNC {overlay.image_path} is the recorded one (sha256 "
+            f"{recorded_sha256(overlay)}), and {overlay.path.relative_to(REPO_ROOT)} is it plus "
+            f"{overlay.patch_file.relative_to(REPO_ROOT)}"
+        )
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

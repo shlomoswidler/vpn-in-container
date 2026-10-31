@@ -111,14 +111,16 @@ if [[ " ${SERVICE_ARGS[*]} " != *" $NATIVE_CSS_SOURCE:"* ]]; then
     exit 1
 fi
 
-# The firefox service mounts config/novnc/cursor.js over the image's, which would hide any
-# change a new image made to it. The image's own file (from a container that is created, never
-# started, so no mount covers it) must still be the one config/novnc/cursor.js.patch was made
-# from (config/cursors/README.md).
+# The firefox service mounts config/novnc/cursor.js and ui.js over the image's, which would hide
+# any change a new image made to them. The image's own files (from a container that is created,
+# never started, so no mount covers them) must still be the ones config/novnc/cursor.js.patch
+# and ui.js.patch were made from (config/cursors/README.md).
 docker create --name "$CONTAINER-novnc" "$IMAGE" >/dev/null
-docker cp -q "$CONTAINER-novnc:/opt/noVNC/core/util/cursor.js" "$WORK/image-cursor.js"
+mkdir -p "$WORK/image-novnc/core/util" "$WORK/image-novnc/app"
+docker cp -q "$CONTAINER-novnc:/opt/noVNC/core/util/cursor.js" "$WORK/image-novnc/core/util/"
+docker cp -q "$CONTAINER-novnc:/opt/noVNC/app/ui.js" "$WORK/image-novnc/app/"
 docker rm "$CONTAINER-novnc" >/dev/null
-python3 -I "$REPO/tests/novnc_cursor_patch.py" "$WORK/image-cursor.js"
+python3 -I "$REPO/tests/novnc_patch.py" "$WORK/image-novnc"
 
 # The display size the firefox service asks for, as "WIDTHxHEIGHT".
 display_size() {
