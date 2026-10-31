@@ -36,7 +36,9 @@ set -euo pipefail
 E2E_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$E2E_DIR/../.." && pwd)
 CONTAINER="native-cursor-e2e-$$"
-PROBE_IMAGE=python:3.13-alpine
+# Runs the VNC probes. Pinned by tag and multi-arch index digest, like the
+# images in docker-compose.yml, so results can't change without a repo change.
+PROBE_IMAGE=python:3.13.18-alpine3.24@sha256:7984cf56ceaddebe4fefeb75d64000b9f45d8b77b11a09b24524da6cdc3af0c8
 WORK=$(mktemp -d)
 
 cleanup() {
