@@ -23,8 +23,11 @@
 # noVNC recognizes (config/novnc/core-glyphs.js).
 #
 # Scenario 5 checks that Firefox stays one maximized window: tab drags out of the
-# strip, new-window shortcuts and window-closing shortcuts (config/firefox-autoconfig/,
+# strip, new-window shortcuts, a Shift+clicked link, a window.open() pop-up and
+# window-closing shortcuts (config/firefox-autoconfig/,
 # config/firefox-profile/customKeys.json and the single-window FF_PREF_* entries).
+# After each, it checks the window's tabs (single-window-page.html titles each
+# page uniquely).
 #
 # Scenario 6 checks that Firefox's "Private browsing" indicator shows in the tab
 # strip (userChrome.css shows it when permanent private browsing is on).
@@ -369,75 +372,177 @@ wait_title() {
     return 1
 }
 
-# Drags with the left button from (X,Y) to (X2,Y2) in 20 steps, as a person would.
+# Drags with the left button from (X,Y) to (X2,Y2) in 20 steps, as a person
+# would (the pauses pace the gesture). Returns non-zero if any step fails.
 drag() {
     local x=$1 y=$2 x2=$3 y2=$4 step
-    in_x xdotool mousemove "$x" "$y"
-    sleep 0.5
-    in_x xdotool mousedown 1
-    sleep 0.3
+    in_x xdotool mousemove "$x" "$y" sleep 0.5 mousedown 1 sleep 0.3 || return 1
     for step in $(seq 1 20); do
-        in_x xdotool mousemove $((x + (x2 - x) * step / 20)) $((y + (y2 - y) * step / 20))
-        sleep 0.05
+        in_x xdotool mousemove $((x + (x2 - x) * step / 20)) $((y + (y2 - y) * step / 20)) \
+            sleep 0.05 || return 1
     done
-    sleep 0.8
-    in_x xdotool mouseup 1
+    in_x xdotool sleep 0.8 mouseup 1
 }
 
-# Runs the remaining arguments as a command, then checks that Firefox still has
-# exactly one browser window, the original one, maximized at 0,0 over the whole
-# display, and that the container is still running (closing Firefox's last
-# window stops the container).
-check_single_window() {
-    local label=$1 windows geometry
-    shift
-    checks=$((checks + 1))
-    "$@" || true
-    sleep 3
-    if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" != true ]]; then
-        printf 'FAIL  %-22s the container stopped (Firefox exited)\n' "$label"
-        failures=$((failures + 1))
-        return
-    fi
-    windows=$(in_x xdotool search --onlyvisible --classname Navigator 2>/dev/null |
-        paste -sd ' ' -) || true
-    geometry=$(in_x xdotool getwindowgeometry "$WINDOW" 2>/dev/null |
-        tr -s ' ' | paste -sd ' ' -) || true
-    if [[ "$windows" == "$WINDOW" &&
-        "$geometry" == *"Position: 0,0 "*"Geometry: $(display_size)"* ]]; then
-        printf 'ok    %-22s %s\n' "$label" "$geometry"
+# The title prefix of single-window-page.html's page NAME ("untitled" is a
+# page without a title, such as a new tab).
+tab_prefix() {
+    if [[ "$1" == untitled ]]; then
+        echo ""
     else
-        printf 'FAIL  %-22s windows: %s main: %s\n' "$label" "$windows" "$geometry"
+        echo "sw:$1 "
+    fi
+}
+
+# Prints the ids of Firefox's visible browser windows, space-separated.
+browser_windows() {
+    in_x xdotool search --onlyvisible --classname Navigator 2>/dev/null | paste -sd ' ' -
+}
+
+# Checks that Firefox's window has exactly the tabs NAMES (distinct page names,
+# see tab_prefix), in order, and ends with the last one shown. Alt+K shows tab
+# K, Alt+9 the last tab, and Ctrl+PageDown from the last tab wraps to the
+# first. Every step waits for the title to change to the expected page, so a
+# key Firefox has not handled yet can't pass for one it has. With one tab
+# nothing can change, so Ctrl+PageDown gets SETTLE_S to show a second tab.
+# Prints what differs and returns 1 on a mismatch.
+check_tabs() {
+    local names=() titles=() n k title
+    read -r -a names <<<"$1"
+    n=${#names[@]}
+    if ((n == 1)); then
+        if ! title=$(wait_title "$(tab_prefix "${names[0]}")"); then
+            echo "the window shows '$(shown_title)', not ${names[0]}"
+            return 1
+        fi
+        in_x xdotool key ctrl+Next sleep "$SETTLE_S" || return 1
+        if [[ "$(shown_title)" != "$title" ]]; then
+            echo "a second tab exists: '$(shown_title)'"
+            return 1
+        fi
+        return 0
+    fi
+    # Start from the last tab, so Alt+1 must change the page shown.
+    in_x xdotool key alt+9 || return 1
+    if ! wait_title "$(tab_prefix "${names[n - 1]}")" >/dev/null; then
+        echo "the last tab is '$(shown_title)', not ${names[n - 1]}"
+        return 1
+    fi
+    for ((k = 1; k <= n; k++)); do
+        in_x xdotool key "alt+$k" || return 1
+        if ! title=$(wait_title "$(tab_prefix "${names[k - 1]}")"); then
+            echo "tab $k is '$(shown_title)', not ${names[k - 1]}"
+            return 1
+        fi
+        titles+=("$title")
+    done
+    # Tab N must be the last tab: the next one is the first again.
+    in_x xdotool key ctrl+Next || return 1
+    if ! wait_title "${titles[0]}" >/dev/null; then
+        echo "after tab $n comes '$(shown_title)', not tab 1"
+        return 1
+    fi
+    in_x xdotool key "alt+$n" || return 1
+    wait_title "${titles[n - 1]}" >/dev/null
+}
+
+# check_single_window LABEL TABS SHOWS ACTION...
+# Runs ACTION, then checks that Firefox still has exactly one browser window,
+# the original one, maximized at 0,0 over the whole display, that the
+# container is still running (closing Firefox's last window stops it), and
+# that the window has exactly the tabs TABS (see check_tabs). SHOWS is the
+# page ACTION must show in that window, which the check waits for, or "-" if
+# ACTION should change nothing: there is nothing to wait for then, so the
+# check gives a second window SETTLE_S to appear. A failed ACTION fails.
+check_single_window() {
+    local label=$1 tabs=$2 shows=$3 problem="" windows="" geometry="" deadline
+    shift 3
+    checks=$((checks + 1))
+    if ! "$@"; then
+        problem="the action failed: $*"
+    elif [[ "$shows" == - ]]; then
+        sleep "$SETTLE_S"
+    elif ! wait_title "$(tab_prefix "$shows")" >/dev/null; then
+        problem="the window shows '$(shown_title)', not $shows"
+    else
+        # A second window may still be closing after its tabs moved.
+        deadline=$((SECONDS + 15))
+        until [[ "$(browser_windows || true)" == "$WINDOW" ]] || ((SECONDS >= deadline)); do
+            sleep 0.2
+        done
+    fi
+    if [[ -z "$problem" ]]; then
+        if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" != true ]]; then
+            problem="the container stopped (Firefox exited)"
+        else
+            windows=$(browser_windows) || true
+            geometry=$(in_x xdotool getwindowgeometry "$WINDOW" 2>/dev/null |
+                tr -s ' ' | paste -sd ' ' -) || true
+            if [[ "$windows" != "$WINDOW" ||
+                "$geometry" != *"Position: 0,0 "*"Geometry: $(display_size)"* ]]; then
+                problem="windows: $windows main: $geometry"
+            elif ! problem=$(check_tabs "$tabs"); then
+                problem="tabs: $problem"
+            fi
+        fi
+    fi
+    if [[ -z "$problem" ]]; then
+        printf 'ok    %-22s tabs: %s\n' "$label" "$tabs"
+    else
+        printf 'FAIL  %-22s %s\n' "$label" "$problem"
         failures=$((failures + 1))
     fi
+}
+
+# Closes the shown tab with Ctrl+W and waits until each NAME in turn is shown
+# (one Ctrl+W per name).
+close_tabs() {
+    local name
+    for name in "$@"; do
+        in_x xdotool key ctrl+w || return 1
+        wait_title "$(tab_prefix "$name")" >/dev/null || return 1
+    done
 }
 
 # Firefox is a single window here: dropping a tab outside the tab strip must not
 # un-maximize the window or open a new one, new-window shortcuts must not open
-# one, and the window-closing shortcuts must not close the only one.
+# one, links and pop-ups that ask for a new window must open as tabs in it
+# (config/firefox-autoconfig/single-window.cfg and the FF_PREF_* entries), and
+# the window-closing shortcuts must not close the only one. Ctrl+T, Ctrl+W and
+# a tab dragged along the tab strip are controls: they must change the tabs,
+# which shows the keys and drags reach Firefox.
 echo "== scenario 5: Firefox stays one maximized window"
-start_firefox_windowed
+SETTLE_S=2
+start_firefox_windowed single-window-page.html "sw:main "
 in_x xdotool windowactivate --sync "$WINDOW"
-# The first tab's handle is at (100,20) at any display size (tabs start at the
-# left and have a fixed width). Tabs are dropped into the right and left parts
-# of the page.
+# The first tab's handle is at (100,20) and the second's at (420,20) at any
+# display size (tabs start at the left and have a fixed width). Tabs are
+# dropped into the right and left parts of the page. The page's top half is
+# a link and its bottom half a pop-up button.
 drop_right_x=$((DISPLAY_W * 3 / 4))
 drop_right_y=$((DISPLAY_H * 5 / 9))
 drop_left_x=$((DISPLAY_W / 8))
 drop_left_y=$((DISPLAY_H * 2 / 3))
-check_single_window only-tab-dragged-down drag 100 20 "$drop_right_x" "$drop_right_y"
-check_single_window only-tab-dragged-left drag 100 20 "$drop_left_x" "$drop_left_y"
-check_single_window ctrl-n in_x xdotool key ctrl+n
-check_single_window ctrl-shift-p in_x xdotool key ctrl+shift+p
-in_x xdotool windowactivate --sync "$WINDOW" key ctrl+t
-if ! wait_title "" >/dev/null; then
-    echo "FAIL: Ctrl+T did not show a new tab" >&2
-    exit 1
-fi
-check_single_window second-tab-torn-off drag 100 20 "$drop_right_x" "$drop_right_y"
+link_y=$((DISPLAY_H * 3 / 8))
+popup_y=$((DISPLAY_H * 7 / 8))
+check_single_window only-tab-dragged-down main - drag 100 20 "$drop_right_x" "$drop_right_y"
+check_single_window only-tab-dragged-left main - drag 100 20 "$drop_left_x" "$drop_left_y"
+check_single_window ctrl-n main - in_x xdotool key ctrl+n
+check_single_window ctrl-shift-p main - in_x xdotool key ctrl+shift+p
+check_single_window ctrl-t "main untitled" untitled in_x xdotool key ctrl+t
+check_single_window ctrl-w main main in_x xdotool key ctrl+w
+# Opens a new window; single-window.cfg moves its tab into the first window.
+check_single_window shift-click "main shift-click" shift-click \
+    in_x xdotool mousemove "$((DISPLAY_W / 2))" "$link_y" keydown shift click 1 keyup shift
+check_single_window tab-moved-along-strip "shift-click main" main drag 100 20 420 20
+check_single_window second-tab-torn-off "shift-click main" - \
+    drag 100 20 "$drop_right_x" "$drop_right_y"
+# window.open() with a size asks for a 400x300 pop-up window.
+check_single_window popup "shift-click main popup" popup \
+    in_x xdotool mousemove "$((DISPLAY_W / 2))" "$popup_y" click 1
 # These come last: a failure here closes Firefox and stops the container.
-check_single_window ctrl-shift-w in_x xdotool key ctrl+shift+w
-check_single_window ctrl-w-every-tab in_x xdotool key ctrl+w sleep 1 key ctrl+w sleep 1 key ctrl+w
+check_single_window ctrl-shift-w "shift-click main popup" - in_x xdotool key ctrl+shift+w
+check_single_window ctrl-w-every-tab untitled untitled close_tabs main shift-click untitled
 
 # Counts the pixels within TOLERANCE of COLOR (RRGGBB) in the screen region
 # X Y W H, read over VNC; prints rfb_color_probe.py's JSON summary.
