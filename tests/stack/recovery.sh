@@ -41,7 +41,12 @@ done
 SAMPLE_INTERVAL=2
 STACK_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$STACK_DIR/../.." && pwd)
-PLAIN_IMAGE=alpine:3.24
+# A plain container on Docker's default network (the host's path out), pinned
+# as in tests/stack/run.sh.
+PLAIN_IMAGE=alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+# Services that answer with the caller's public IP, in order of preference;
+# the second is the fallback when the first fails or rate-limits.
+IP_SERVICES="https://ipinfo.io/ip https://api.ipify.org"
 QBT_URL=http://localhost:9080
 FIREFOX_URL=http://localhost:5800
 WORK=$(mktemp -d)
@@ -114,19 +119,32 @@ for line in sys.stdin.read().split():
 }
 
 # Prints the public IP a container's network leaves from, or nothing:
-# egress_ip CONTAINER. curl where the image has it (qBittorrent), with
-# ipinfo.io's address given (IPINFO_ADDR, from precheck), so the probe does
-# not depend on DNS; otherwise BusyBox wget (Firefox). They share one network.
+# egress_ip CONTAINER. Tries each IP service in turn: with curl where the image
+# has it (qBittorrent), given each service's address (RESOLVES, from precheck),
+# so the probe does not depend on DNS; otherwise with BusyBox wget (Firefox).
+# The two share one network.
 egress_ip() {
-    local ip
-    ip=$(docker exec -e IPINFO_ADDR="${IPINFO_ADDR:-}" "$1" sh -c 'if command -v curl >/dev/null 2>&1; then
-            curl -s --max-time 5 ${IPINFO_ADDR:+--resolve "ipinfo.io:443:$IPINFO_ADDR"} https://ipinfo.io/ip
-        else
-            wget -qO- -T 5 https://ipinfo.io/ip
-        fi' 2>/dev/null | tr -d '[:space:]') || true
-    if [[ "$ip" =~ ^[0-9a-fA-F.:]+$ ]]; then
-        echo "$ip"
-    fi
+    docker exec -e IP_SERVICES="$IP_SERVICES" -e RESOLVES="${RESOLVES:-}" "$1" sh -c '
+        for url in $IP_SERVICES; do
+            if command -v curl >/dev/null 2>&1; then
+                host=${url#https://}
+                host=${host%%/*}
+                set --
+                for entry in $RESOLVES; do
+                    case "$entry" in "$host":*) set -- --resolve "$entry" ;; esac
+                done
+                ip=$(curl -s --max-time 5 "$@" "$url" | tr -d "[:space:]")
+            else
+                ip=$(wget -qO- -T 5 "$url" 2>/dev/null | tr -d "[:space:]")
+            fi
+            case "$ip" in
+                "" | *[!0-9a-fA-F.:]*) ;;
+                *)
+                    echo "$ip"
+                    exit 0
+                    ;;
+            esac
+        done' 2>/dev/null || true
 }
 
 health() {
@@ -157,19 +175,34 @@ precheck() {
         abort "$AUTOHEAL is not running"
     host_ip=""
     for _ in 1 2 3; do
-        host_ip=$(docker run --rm "$PLAIN_IMAGE" wget -qO- -T 10 https://ipinfo.io/ip 2>/dev/null |
-            tr -d '[:space:]') || true
-        [[ "$host_ip" =~ ^[0-9.]+$ ]] && break
-        host_ip=""
+        for url in $IP_SERVICES; do
+            host_ip=$(docker run --rm "$PLAIN_IMAGE" wget -qO- -T 10 "$url" 2>/dev/null |
+                tr -d '[:space:]') || true
+            [[ "$host_ip" =~ ^[0-9.]+$ ]] && break 2
+            host_ip=""
+        done
         sleep 3
     done
     [[ -n "$host_ip" ]] || abort "could not read the host's public IP"
     # The host's IPv6 egress, if it has one: a sample in its /64 is a leak too.
     host_ip6=$(curl -6 -s --max-time 10 https://api6.ipify.org 2>/dev/null | tr -d '[:space:]') || host_ip6=""
-    # ipinfo.io's address, so qBittorrent's probe does not depend on DNS (which
-    # also fails while the tunnel is down, and would hide a leak).
-    IPINFO_ADDR=$(docker exec "$QBT" getent ahostsv4 ipinfo.io 2>/dev/null | awk 'NR == 1 { print $1 }' || true)
-    [[ "$IPINFO_ADDR" =~ ^[0-9.]+$ ]] || abort "could not resolve ipinfo.io"
+    # Each IP service's address (host:443:address for curl --resolve), so
+    # qBittorrent's probe does not depend on DNS, which also fails while the
+    # tunnel is down and would hide a leak. A service that does not resolve now
+    # is tried without; at least one must resolve.
+    RESOLVES=""
+    for url in $IP_SERVICES; do
+        service_host=${url#https://}
+        service_host=${service_host%%/*}
+        address=$(docker exec "$QBT" getent ahostsv4 "$service_host" 2>/dev/null |
+            awk 'NR == 1 { print $1 }' || true)
+        if [[ "$address" =~ ^[0-9.]+$ ]]; then
+            RESOLVES="$RESOLVES $service_host:443:$address"
+        else
+            echo "could not resolve $service_host; trying it without a pinned address"
+        fi
+    done
+    [[ -n "$RESOLVES" ]] || abort "could not resolve any of: $IP_SERVICES"
     for container in "$FIREFOX" "$QBT"; do
         ip=$(egress_ip "$container")
         [[ -n "$ip" && "$ip" != "$host_ip" ]] || abort "$container leaves from '$ip', not through the VPN"
