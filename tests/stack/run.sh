@@ -8,6 +8,8 @@
 #     TCP and ICMP forced around the tunnel (while the same probes through the
 #     tunnel get through); the firewall lets out of the bypassed interface only
 #     UDP to the WireGuard endpoint
+#   - IPv6: the firewall drops it by default, and IPv6 egress from the VPN's
+#     network fails (or leaves through the tunnel), never from the host's
 #   - DNS goes through Gluetun and resolves
 #   - Gluetun's forwarded port is qBittorrent's listening port, and qSticky
 #     restores it after it is changed
@@ -282,6 +284,83 @@ elif [[ "$bypass_icmp" == "1 "* && "$bypass_icmp" == *"Operation not permitted"*
     pass "kill switch (ICMP): ping forced out $bypass_if is refused by the firewall, through $tun_if it gets through"
 else
     fail "kill switch (ICMP): ping forced out '$bypass_if': exit and output: $bypass_icmp"
+fi
+
+echo "== IPv6"
+output6_rules=$(docker exec "$VPN" ip6tables -S OUTPUT 2>/dev/null || true)
+if grep -qx -- '-P OUTPUT DROP' <<<"$output6_rules"; then
+    pass "IPv6 firewall drops outgoing traffic by default"
+else
+    fail "IPv6 firewall OUTPUT policy is not DROP: $(grep -- '^-P OUTPUT' <<<"$output6_rules" || echo none)"
+fi
+# Accepting IPv6 OUTPUT rules: loopback, established, the tunnel, and neighbor
+# discovery (solicited-node multicast) on the bypassed interface.
+rules6_verdict=$(python3 -I -c '
+import sys
+tun, eth = sys.argv[1:]
+allowed = {
+    "-A OUTPUT -o lo -j ACCEPT",
+    "-A OUTPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+    f"-A OUTPUT -o {tun} -j ACCEPT",
+    f"-A OUTPUT -d ff02::1:ff00:0/104 -o {eth} -j ACCEPT",
+}
+rules = [line for line in sys.stdin.read().splitlines() if line.startswith("-A OUTPUT ")]
+unexpected = [r for r in rules if not r.endswith((" -j DROP", " -j REJECT")) and r not in allowed]
+print("FAIL unexpected rule(s): " + " | ".join(unexpected) if unexpected else "OK")' \
+    "${tun_if:-none}" "${bypass_if:-none}" <<<"$output6_rules" 2>&1 || true)
+if [[ "$rules6_verdict" == OK ]]; then
+    pass "IPv6 firewall lets out only the tunnel, loopback, established and neighbor discovery"
+else
+    fail "IPv6 firewall OUTPUT rules: ${rules6_verdict#FAIL }"
+fi
+# The host's IPv6 source address, if it has an IPv6 route (a UDP connect sends
+# nothing), and its IPv6 egress address as an IPv6-only service sees it.
+host_src6=$(python3 -I -c '
+import ipaddress, socket
+try:
+    with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as s:
+        s.connect(("2606:4700:4700::1111", 443))
+        address = ipaddress.ip_address(s.getsockname()[0].split("%")[0])
+        print(address if address.is_global else "")
+except OSError:
+    print("")')
+host_ip6=""
+if [[ -n "$host_src6" ]]; then
+    host_ip6=$(public_ip curl -6 -s --max-time 10 https://api6.ipify.org) || host_ip6=""
+fi
+ns6_rc=0
+ns_ip6=$(docker exec "$QBT" curl -6 -s --max-time 10 https://api6.ipify.org 2>/dev/null) || ns6_rc=$?
+# Positive control: the same service over IPv4 from the same namespace.
+ns_ip4=$(public_ip docker exec "$QBT" curl -4 -s --max-time 10 https://api64.ipify.org) || ns_ip4=""
+tun_ip6=$(docker exec "$VPN" ip -6 -o addr show dev "${tun_if:-none}" scope global 2>/dev/null || true)
+ipv6_verdict=$(python3 -I -c '
+import ipaddress, sys
+host_src6, host_ip6, rc, ns_ip6, ns_ip4, vpn_ip, tun_ip6 = sys.argv[1:]
+if host_src6 and not host_ip6:
+    sys.exit(f"FAIL inconclusive: the host has IPv6 ({host_src6}) but api6.ipify.org did not answer it")
+if not vpn_ip or ns_ip4 != vpn_ip:
+    sys.exit(f"FAIL inconclusive: over IPv4 the namespace got {ns_ip4!r}, the VPN IP is {vpn_ip!r}")
+host_net = ipaddress.ip_network(host_ip6 + "/64", strict=False) if host_ip6 else None
+host_note = "the host has IPv6 egress" if host_ip6 else "the host has no IPv6"
+if rc == "0":
+    try:
+        address = ipaddress.ip_address(ns_ip6.strip())
+    except ValueError:
+        sys.exit(f"FAIL unexpected IPv6 answer {ns_ip6!r}")
+    if host_net and address in host_net:
+        sys.exit(f"FAIL IPv6 LEAK: the namespace left from {address}, in the host network {host_net}")
+    if not tun_ip6:
+        sys.exit(f"FAIL IPv6 got out from {address} although the tunnel has no IPv6 address")
+    print(f"OK IPv6 leaves through the tunnel ({address}; {host_note})")
+elif rc in ("7", "28"):
+    print(f"OK IPv6 egress fails (curl exit {rc}); over IPv4 the same service sees the VPN IP; {host_note}")
+else:
+    print(f"FAIL inconclusive: IPv6 request failed with curl exit {rc}")' \
+    "$host_src6" "$host_ip6" "$ns6_rc" "$ns_ip6" "$ns_ip4" "$vpn_ip" "$tun_ip6" 2>&1 || true)
+if [[ "$ipv6_verdict" == OK* ]]; then
+    pass "${ipv6_verdict#OK }"
+else
+    fail "IPv6 egress: ${ipv6_verdict#FAIL }"
 fi
 
 echo "== DNS"
