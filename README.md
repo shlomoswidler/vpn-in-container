@@ -319,16 +319,38 @@ docker inspect --format='{{.State.Health.Status}}' qsticky
 
 ### Test Kill Switch
 
+This drops the VPN connection the way a real outage does, and checks that qBittorrent's traffic
+is blocked instead of leaving from your own IP. The probe goes to an IP address
+(`https://1.1.1.1/cdn-cgi/trace`, which answers with the caller's IP), so a DNS failure during the
+outage cannot hide a leak.
+
 ```bash
-# Stop VPN
-docker compose stop vpn
+# 1. Before: your own IP, then qBittorrent's (the VPN's); they must differ
+curl -s --max-time 10 https://1.1.1.1/cdn-cgi/trace | grep '^ip='
+docker exec qbittorrent curl -s --max-time 10 https://1.1.1.1/cdn-cgi/trace | grep '^ip='
 
-# Try to access internet (should fail/timeout)
-docker exec gluetun-vpn wget -qO- --timeout=5 ifconfig.me/ip
+# 2. Take the tunnel interface down inside Gluetun, as when the VPN connection drops
+docker exec gluetun-vpn ip link set dev tun0 down
 
-# Restart VPN
-docker compose start vpn
+# 3. Right away: the same request from qBittorrent must fail, not show your own IP
+docker exec qbittorrent curl -s --max-time 10 https://1.1.1.1/cdn-cgi/trace | grep '^ip=' ||
+  echo "blocked: the kill switch works"
+
+# 4. Gluetun notices and reconnects by itself, usually within a minute; nothing restarts.
+#    This prints the VPN's IP once traffic flows again:
+until docker exec qbittorrent curl -s --max-time 10 https://1.1.1.1/cdn-cgi/trace | grep '^ip='; do
+  sleep 5
+done
+docker compose logs --since 5m vpn | grep 'Connecting to'   # the reconnect
 ```
+
+The firewall also blocks traffic that tries to go around the tunnel while it is up:
+`docker exec gluetun-vpn ping -c 1 -W 3 -I eth0 1.1.1.1` must fail.
+
+`tests/stack/recovery.sh 300 tunnel-down` automates this: it samples Firefox's and qBittorrent's
+public IP every few seconds during the outage, fails on any sample that is not the VPN's, and
+times each step of the recovery. `tests/stack/run.sh` checks the firewall rules and probes around
+the tunnel without disrupting anything.
 
 ### Test Self-Healing
 
