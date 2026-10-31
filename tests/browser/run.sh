@@ -40,6 +40,35 @@ for file in cursor.js cursor-keyword.js core-glyphs.js; do
 done
 cp "$BROWSER_DIR/harness.html" "$WORK/site/"
 node "$BROWSER_DIR/make-cases.mjs" "$WORK/site/cases.js"
+# The harness reports how many cases it checked; a run passes only if that is
+# every generated case and none failed.
+EXPECTED=$(node -e '
+    const { pathToFileURL } = require("node:url");
+    import(pathToFileURL(process.argv[1])).then(m => console.log(m.default.length));
+' "$WORK/site/cases.js")
+if [[ ! "$EXPECTED" =~ ^[1-9][0-9]*$ ]]; then
+    echo "FAIL  no cases generated (count: '$EXPECTED')"
+    exit 1
+fi
+
+# Exits 0 if the harness result (JSON) checked all EXPECTED cases with none failed.
+result_ok() {
+    python3 -I -c '
+import json, sys
+try:
+    result = json.loads(sys.argv[1])
+except ValueError:
+    sys.exit(1)
+ok = (
+    isinstance(result, dict)
+    and type(result.get("total")) is int
+    and type(result.get("failed")) is int
+    and result["total"] == int(sys.argv[2])
+    and result["failed"] == 0
+)
+sys.exit(0 if ok else 1)
+' "$1" "$EXPECTED"
+}
 
 free_port() {
     python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
@@ -63,10 +92,10 @@ if [[ -x "$CHROME" ]]; then
     result=$("$CHROME" --headless=new --disable-gpu --no-first-run \
         --user-data-dir="$WORK/profiles/chrome" --virtual-time-budget=10000 \
         --dump-dom "$URL" 2>/dev/null | sed -n 's:.*<pre id="result">\(.*\)</pre>.*:\1:p')
-    if [[ "$result" == *'"failed":0,'* ]]; then
+    if result_ok "$result"; then
         echo "ok    $version: $result"
     else
-        echo "FAIL  $version: ${result:-no result in page}"
+        echo "FAIL  $version (expected $EXPECTED cases, none failed): ${result:-no result in page}"
         failures=$((failures + 1))
     fi
 fi
@@ -78,10 +107,10 @@ if [[ -x "$FIREFOX" ]]; then
     bidi_port=$(free_port)
     result=$(node "$BROWSER_DIR/firefox-bidi.mjs" "$FIREFOX" "$WORK/profiles/firefox" \
         "$bidi_port" "$URL") || true
-    if [[ "$result" == *'"failed":0,'* ]]; then
+    if result_ok "$result"; then
         echo "ok    $version: $result"
     else
-        echo "FAIL  $version: ${result:-no result in page}"
+        echo "FAIL  $version (expected $EXPECTED cases, none failed): ${result:-no result in page}"
         failures=$((failures + 1))
     fi
 fi
