@@ -5,7 +5,8 @@
 config/firefox/
 config/qbittorrent/
 
-# Gluetun config contains API key
+# Gluetun's old auth file, with the API key in plain text. No longer read: Compose writes
+# Gluetun's auth file from .env (configs: gluetun_auth). Installs from before still have it.
 config/gluetun/config.toml
 
 # Gluetun's VPN server list: runtime data it rewrites on start (v3.42+ keeps it in servers/)
