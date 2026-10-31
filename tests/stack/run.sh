@@ -32,7 +32,13 @@ set -euo pipefail
 
 STACK_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$STACK_DIR/../.." && pwd)
-PLAIN_IMAGE=alpine:3.24
+# A plain container on Docker's default network (the host's path out). Pinned
+# by tag and multi-arch index digest, like docker-compose.yml's images; to
+# update: docker buildx imagetools inspect alpine:<tag> (the top "Digest:").
+PLAIN_IMAGE=alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+# Services that answer with the caller's public IP, in order of preference;
+# the second is the fallback when the first fails or rate-limits.
+IP_SERVICES="https://ipinfo.io/ip https://api.ipify.org"
 QBT_URL=http://localhost:9080
 FIREFOX_URL=http://localhost:5800
 HEALTH_TIMEOUT=360
@@ -102,7 +108,7 @@ print(json.dumps(value) if isinstance(value, (dict, list)) else value)' "$1"
 }
 
 # Runs a command until it prints an IP address (3 tries); prints the address.
-public_ip() {
+retry_ip() {
     local ip
     for _ in 1 2 3; do
         ip=$("$@" 2>/dev/null | tr -d '[:space:]') || true
@@ -110,6 +116,22 @@ public_ip() {
             echo "$ip"
             return 0
         fi
+        sleep 3
+    done
+    return 1
+}
+# Runs a fetch command with each IP service URL appended, until one prints an
+# IP address (3 rounds); prints the address: public_ip COMMAND...
+public_ip() {
+    local ip url
+    for _ in 1 2 3; do
+        for url in $IP_SERVICES; do
+            ip=$("$@" "$url" 2>/dev/null | tr -d '[:space:]') || true
+            if [[ "$ip" =~ ^[0-9a-fA-F.:]+$ ]]; then
+                echo "$ip"
+                return 0
+            fi
+        done
         sleep 3
     done
     return 1
@@ -223,10 +245,10 @@ else
 fi
 
 echo "== VPN egress and kill switch"
-host_ip=$(public_ip docker run --rm "$PLAIN_IMAGE" wget -qO- -T 10 https://ipinfo.io/ip) || host_ip=""
-vpn_ip=$(public_ip docker exec "$VPN" wget -qO- -T 10 https://ipinfo.io/ip) || vpn_ip=""
-qbt_ip=$(public_ip docker exec "$QBT" curl -s --max-time 10 https://ipinfo.io/ip) || qbt_ip=""
-firefox_ip=$(public_ip docker exec "$FIREFOX" wget -qO- -T 10 https://ipinfo.io/ip) || firefox_ip=""
+host_ip=$(public_ip docker run --rm "$PLAIN_IMAGE" wget -qO- -T 10) || host_ip=""
+vpn_ip=$(public_ip docker exec "$VPN" wget -qO- -T 10) || vpn_ip=""
+qbt_ip=$(public_ip docker exec "$QBT" curl -s --max-time 10) || qbt_ip=""
+firefox_ip=$(public_ip docker exec "$FIREFOX" wget -qO- -T 10) || firefox_ip=""
 if [[ -n "$host_ip" && -n "$vpn_ip" && "$vpn_ip" != "$host_ip" ]]; then
     pass "VPN public IP $vpn_ip differs from the host's"
 else
@@ -387,12 +409,12 @@ except OSError:
     print("")')
 host_ip6=""
 if [[ -n "$host_src6" ]]; then
-    host_ip6=$(public_ip curl -6 -s --max-time 10 https://api6.ipify.org) || host_ip6=""
+    host_ip6=$(retry_ip curl -6 -s --max-time 10 https://api6.ipify.org) || host_ip6=""
 fi
 ns6_rc=0
 ns_ip6=$(docker exec "$QBT" curl -6 -s --max-time 10 https://api6.ipify.org 2>/dev/null) || ns6_rc=$?
 # Positive control: the same service over IPv4 from the same namespace.
-ns_ip4=$(public_ip docker exec "$QBT" curl -4 -s --max-time 10 https://api64.ipify.org) || ns_ip4=""
+ns_ip4=$(retry_ip docker exec "$QBT" curl -4 -s --max-time 10 https://api64.ipify.org) || ns_ip4=""
 tun_ip6=$(docker exec "$VPN" ip -6 -o addr show dev "${tun_if:-none}" scope global 2>/dev/null || true)
 ipv6_verdict=$(python3 -I -c '
 import ipaddress, sys
