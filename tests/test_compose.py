@@ -617,6 +617,11 @@ class ComposeTests(unittest.TestCase):
         prefs = {v for k, v in environment.items() if k.startswith("FF_PREF_")}
         self.assertLessEqual(FIREFOX_PREFS, prefs)
 
+    def test_firefox_streams_its_audio_to_the_web_ui(self):
+        # The image's default is 0: no PulseAudio server, no recorder, no /websockify-audio,
+        # and the web UI hides its audio controls, so pages play without sound.
+        self.assertEqual(self.services["firefox"].get("environment", {}).get("WEB_AUDIO"), "1")
+
     def test_firefox_cursor_size_matches_the_theme(self):
         size = self.services["firefox"].get("environment", {}).get("XCURSOR_SIZE")
         self.assertEqual(size, str(generator_nominal_size()))

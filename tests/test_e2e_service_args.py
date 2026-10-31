@@ -41,6 +41,7 @@ class ServiceArgsTests(unittest.TestCase):
         args = self.args(
             environment={
                 "XCURSOR_SIZE": "24",
+                "WEB_AUDIO": "1",
                 "FF_PREF_B": "b.pref=1",
                 "FF_PREF_A": "a.pref=true",
                 "WEB_AUTHENTICATION": "0",
@@ -48,7 +49,7 @@ class ServiceArgsTests(unittest.TestCase):
         )
         self.assertEqual(
             option_values(args, "-e"),
-            ["XCURSOR_SIZE=24", "FF_PREF_A=a.pref=true", "FF_PREF_B=b.pref=1"],
+            ["XCURSOR_SIZE=24", "WEB_AUDIO=1", "FF_PREF_A=a.pref=true", "FF_PREF_B=b.pref=1"],
         )
 
     def test_only_read_only_mounts_under_the_browser_directories_pass_through(self):

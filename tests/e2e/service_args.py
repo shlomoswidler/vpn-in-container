@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turn the firefox service from `docker compose config --format json` (stdin)
 into the image name (first line) and `docker run` arguments (one per line)
-that reproduce its browser setup: the XCURSOR_*, display and FF_PREF_*
+that reproduce its browser setup: the XCURSOR_*, display, WEB_AUDIO and FF_PREF_*
 environment variables, and the read-only mounts under the cursor-related
 directories, the Firefox profile (userChrome.css, customKeys.json) and the
 Firefox install directory (autoconfig). It also carries the service's security
@@ -16,7 +16,14 @@ from pathlib import Path
 
 RUN_ARGS = Path(__file__).resolve().parent.parent / "run_args.py"
 
-ENV_KEYS = ("XCURSOR_THEME", "XCURSOR_SIZE", "DISPLAY_WIDTH", "DISPLAY_HEIGHT", "DARK_MODE")
+ENV_KEYS = (
+    "XCURSOR_THEME",
+    "XCURSOR_SIZE",
+    "DISPLAY_WIDTH",
+    "DISPLAY_HEIGHT",
+    "DARK_MODE",
+    "WEB_AUDIO",
+)
 FF_PREF_PREFIX = "FF_PREF_"
 MOUNT_PREFIXES = (
     "/usr/share/icons/",
