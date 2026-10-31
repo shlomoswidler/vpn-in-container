@@ -174,7 +174,9 @@ docker compose stop
 
 ### Configure Torrent Control (First Time Only)
 
-The Torrent Control extension is pre-installed. Configure it once to enable one-click magnet links:
+The Torrent Control extension is pre-installed, and allowed in private windows (every window here
+is private), both by `config/firefox-policies/policies.json`. Configure it once to enable
+one-click magnet links:
 
 1. In Firefox (at `http://localhost:5800`), click the Torrent Control extension icon (puzzle piece in toolbar)
 2. Click **Options/Settings**
@@ -509,7 +511,7 @@ vpn-in-container/
 │   │   ├── 57-openbox-no-keepborder.sh  # Removes the 1px top border (unthemed cursor strip)
 │   │   └── 58-openbox-no-alt-drag.sh    # Removes Openbox's Alt+drag move/resize bindings
 │   ├── firefox-policies/
-│   │   └── policies.json   # Pre-installs Torrent Control extension
+│   │   └── policies.json   # Installs Torrent Control, allowed in private windows
 │   ├── novnc/
 │   │   ├── cursor.js       # Patched noVNC cursor: shows native cursors
 │   │   ├── cursor-keyword.js  # Recognizes marker cursors and Openbox's core glyphs
