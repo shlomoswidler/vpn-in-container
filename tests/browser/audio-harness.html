@@ -1,0 +1,250 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>audio harness: running</title>
+<style>
+html, body { margin: 0; height: 100%; }
+body.pass { background: rgb(0, 160, 0); }
+body.fail { background: rgb(200, 0, 0); }
+#target { position: fixed; inset: 0; }
+</style>
+</head>
+<body>
+<div id="target"></div>
+<pre id="result"></pre>
+<script>
+// Any script or module-loading error fails the run visibly.
+function reportError(message) {
+    document.body.className = 'fail';
+    document.title = 'audio harness: FAIL';
+    document.getElementById('result').textContent = JSON.stringify({ error: String(message) });
+}
+window.addEventListener('error', e => reportError(e.message || (e.target && e.target.src)), true);
+window.addEventListener('unhandledrejection', e => reportError(e.reason));
+</script>
+<script type="module">
+// Runs the image's real PCMPlayer (app/pcm-player.min.js, the web UI's audio decoder) on
+// synthetic audio in the recorder's format: s16le, 2 interleaved channels (left first),
+// 44.1 kHz, fed in real time as the web UI feeds WebSocket messages. A splitter and two
+// analysers tap the player's gain node (its output, after the volume) instead of the
+// speakers, through a muted gain, so the run makes no sound.
+//
+// Before any user gesture, the browser's autoplay policy must keep the player's
+// AudioContext suspended, and the player must play nothing. Then the page asks for a click
+// (title CLICK_TITLE), which the test driver makes as a real (trusted) click; the player's
+// own handler (app/unmute.min.js) resumes the context, and the rest of the cases run.
+// The result, in #result: {"total", "failed", "failures", "cases"}.
+import { PCMPlayer } from './app/pcm-player.min.js';
+
+const CLICK_TITLE = 'audio harness: click to start';
+const RATE = 44100;
+const BYTE_RATE = RATE * 4;
+const MESSAGE_BYTES = 1764; // 10 ms: the recorder's fragment
+const LEFT_HZ = 1000;
+const RIGHT_HZ = 1500;
+const AMPLITUDE = 0.25;
+const VOLUME = 0.5; // as ui.js sets it: player.volume(slider / 100)
+const SECONDS = 1.5;
+const EXPECTED_RMS = AMPLITUDE * VOLUME / Math.SQRT2;
+
+// Interleaved s16le stereo: LEFT_HZ left, RIGHT_HZ right, AMPLITUDE each.
+function tone(seconds) {
+    const frames = Math.round(seconds * RATE);
+    const view = new DataView(new ArrayBuffer(frames * 4));
+    for (let i = 0; i < frames; i++) {
+        const t = i / RATE;
+        view.setInt16(i * 4, Math.round(AMPLITUDE * Math.sin(2 * Math.PI * LEFT_HZ * t) * 32768), true);
+        view.setInt16(i * 4 + 2, Math.round(AMPLITUDE * Math.sin(2 * Math.PI * RIGHT_HZ * t) * 32768), true);
+    }
+    return new Uint8Array(view.buffer);
+}
+
+// BYTES cut into messages whose sizes cycle through SIZES, each with the stream offset it
+// starts at; every message is its own ArrayBuffer, as a WebSocket delivers it.
+function cut(bytes, sizes) {
+    const messages = [];
+    for (let offset = 0, i = 0; offset < bytes.length; i++) {
+        const size = sizes[i % sizes.length];
+        messages.push({ offset, data: bytes.slice(offset, offset + size).buffer });
+        offset += size;
+    }
+    return messages;
+}
+
+// Feeds MESSAGES to PLAYER in real time, each LEAD_S before its offset is due (as network
+// buffering would; fed exactly on time, timer jitter makes the player miss its start times
+// and restart with a fade). Resolves once the last is fed: LEAD_S before it plays, so the
+// analysers' window (32768 samples, 0.68 s at 48 kHz) then holds only this stream.
+const LEAD_S = 0.1;
+function feed(player, messages) {
+    return new Promise(resolve => {
+        const start = performance.now();
+        let next = 0;
+        const timer = setInterval(() => {
+            const due = ((performance.now() - start) / 1000 + LEAD_S) * BYTE_RATE;
+            while (next < messages.length && messages[next].offset <= due) {
+                player.feed(messages[next++].data);
+            }
+            if (next === messages.length) {
+                clearInterval(timer);
+                resolve();
+            }
+        }, 5);
+    });
+}
+
+// Taps PLAYER's output: what it would send to the speakers, per channel.
+function tap(player) {
+    const ctx = player.audioCtx;
+    const splitter = ctx.createChannelSplitter(2);
+    const mute = ctx.createGain();
+    mute.gain.value = 0;
+    const analysers = [0, 1].map(channel => {
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 32768;
+        analyser.smoothingTimeConstant = 0;
+        splitter.connect(analyser, channel);
+        analyser.connect(mute);
+        return analyser;
+    });
+    player.gainNode.disconnect();
+    player.gainNode.connect(splitter);
+    mute.connect(ctx.destination);
+    return analysers;
+}
+
+function rms(samples) {
+    let sum = 0;
+    for (const x of samples) sum += x * x;
+    return Math.sqrt(sum / samples.length);
+}
+
+// The share of SAMPLES' energy at HZ (Goertzel), with RATE samples a second.
+function toneFraction(samples, hz, rate) {
+    let energy = 0;
+    for (const x of samples) energy += x * x;
+    if (energy === 0) return 0;
+    const coefficient = 2 * Math.cos(2 * Math.PI * hz / rate);
+    let s1 = 0, s2 = 0;
+    for (const x of samples) {
+        const s0 = x + coefficient * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    return 2 * (s1 * s1 + s2 * s2 - coefficient * s1 * s2) / (samples.length * energy);
+}
+
+// What one channel's analyser holds: RMS, spectrum peak (Hz) and the share at HZ.
+function measure(analyser, hz, rate) {
+    const samples = new Float32Array(analyser.fftSize);
+    analyser.getFloatTimeDomainData(samples);
+    const spectrum = new Float32Array(analyser.frequencyBinCount);
+    analyser.getFloatFrequencyData(spectrum);
+    let peak = 1;
+    for (let i = 1; i < spectrum.length; i++) {
+        if (spectrum[i] > spectrum[peak]) peak = i;
+    }
+    return {
+        rms: rms(samples),
+        peakHz: peak * rate / analyser.fftSize,
+        fraction: toneFraction(samples, hz, rate),
+    };
+}
+
+const cases = [];
+function record(name, ok, details) {
+    cases.push({ name, ok: Boolean(ok), details });
+}
+
+function round(x) {
+    return Math.round(x * 10000) / 10000;
+}
+
+// The left and right channels carry the tone at the volume set.
+function toneProblems(left, right) {
+    const problems = [];
+    for (const [name, m, hz] of [['left', left, LEFT_HZ], ['right', right, RIGHT_HZ]]) {
+        if (Math.abs(m.peakHz - hz) > 10) problems.push(`${name} peak ${m.peakHz} Hz, not ${hz}`);
+        if (m.fraction < 0.9) problems.push(`${name} ${round(m.fraction)} of the energy at ${hz} Hz`);
+        if (Math.abs(m.rms - EXPECTED_RMS) > EXPECTED_RMS * 0.15) {
+            problems.push(`${name} RMS ${round(m.rms)}, expected ${round(EXPECTED_RMS)}`);
+        }
+    }
+    return problems;
+}
+
+function details(left, right) {
+    return Object.fromEntries(Object.entries({ left, right }).map(([name, m]) => [name, {
+        rms: round(m.rms), peakHz: round(m.peakHz), fraction: round(m.fraction),
+    }]));
+}
+
+// The web UI builds its player this way (ui.js), then starts it and sets the volume once
+// audio is turned on (updateAudio).
+const player = new PCMPlayer({ encoding: '16bitIntLE', channels: 2, sampleRate: 44100 });
+const ctx = player.audioCtx;
+const [leftTap, rightTap] = tap(player);
+player.start();
+player.volume(VOLUME);
+const rate = ctx.sampleRate;
+const pcm = tone(SECONDS);
+
+// 1. Before a gesture the context stays suspended and the player drops what it is fed.
+const stateBefore = ctx.state;
+await feed(player, cut(pcm.slice(0, BYTE_RATE / 2), [MESSAGE_BYTES]));
+const silentBefore = [leftTap, rightTap].map(a => measure(a, LEFT_HZ, rate).rms);
+record('suspended before a gesture', stateBefore === 'suspended' && ctx.state === 'suspended' &&
+    silentBefore.every(level => level === 0), {
+    stateBefore, stateAfterFeeding: ctx.state, rms: silentBefore,
+});
+
+// 2. A click resumes it (through the player's own unmute handler).
+const clicked = new Promise(resolve => document.addEventListener('click', resolve, { once: true }));
+document.title = CLICK_TITLE;
+await clicked;
+document.title = 'audio harness: running';
+for (let waited = 0; ctx.state !== 'running' && waited < 5000; waited += 50) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+}
+record('running after a click', ctx.state === 'running', { state: ctx.state, sampleRate: rate });
+
+// 3. The tone, in the recorder's 10 ms messages, comes out on the right channels at the
+// right frequencies and volume.
+await feed(player, cut(pcm, [MESSAGE_BYTES]));
+let left = measure(leftTap, LEFT_HZ, rate);
+let right = measure(rightTap, RIGHT_HZ, rate);
+let problems = toneProblems(left, right);
+record('tone decoded in 1764-byte messages', problems.length === 0, { problems, ...details(left, right) });
+
+// 4. Messages of whole samples but not whole frames decode the same: the player keeps one
+// stream of samples across messages.
+await feed(player, cut(pcm, [1766, 1762]));
+left = measure(leftTap, LEFT_HZ, rate);
+right = measure(rightTap, RIGHT_HZ, rate);
+problems = toneProblems(left, right);
+record('tone decoded in 1766/1762-byte messages', problems.length === 0, { problems, ...details(left, right) });
+
+// 5. A message that is not whole samples is dropped: split mid-sample, nothing plays.
+await feed(player, cut(pcm, [1765, 1763]));
+left = measure(leftTap, LEFT_HZ, rate);
+right = measure(rightTap, RIGHT_HZ, rate);
+record('odd-length messages are dropped', left.rms === 0 && right.rms === 0, details(left, right));
+
+// 6. Whole-sample messages that start mid-sample are decoded a byte off: noise, not the tone.
+await feed(player, cut(pcm.slice(1), [MESSAGE_BYTES]));
+left = measure(leftTap, LEFT_HZ, rate);
+right = measure(rightTap, RIGHT_HZ, rate);
+record('a stream a byte off is not the tone', left.rms > 0 && left.fraction < 0.5 &&
+    right.fraction < 0.5, details(left, right));
+
+player.destroy();
+const failures = cases.filter(c => !c.ok).map(c => c.name);
+const passed = failures.length === 0;
+document.body.className = passed ? 'pass' : 'fail';
+document.title = `audio harness: ${passed ? 'PASS' : 'FAIL'}`;
+document.getElementById('result').textContent =
+    JSON.stringify({ total: cases.length, failed: failures.length, failures, cases });
+</script>
+</body>
+</html>
