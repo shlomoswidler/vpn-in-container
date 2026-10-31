@@ -32,7 +32,9 @@ def problems(prefs: dict) -> list[str]:
         found.append("bypass_local_auth=false")
     if prefs.get("web_ui_address") != "*":
         found.append(f"web_ui_address={prefs.get('web_ui_address')}")
-    if prefs.get("web_ui_domain_list") != "*":
+    if not prefs.get("web_ui_host_header_validation_enabled"):
+        found.append("web_ui_host_header_validation_enabled=false")
+    if prefs.get("web_ui_domain_list") != "localhost;127.0.0.1":
         found.append(f"web_ui_domain_list={prefs.get('web_ui_domain_list')}")
     return found
 

@@ -65,7 +65,16 @@ else
     webui_prefix="WebUI\\"
 fi
 set_config "$webui_section" "${webui_prefix}Address" "*"
-set_config "$webui_section" "${webui_prefix}ServerDomains" "*"
+# Host-header validation is the defense against DNS rebinding (a web page that
+# re-points its own name to this computer, then calls the API as same-origin).
+# Accept only the names the clients use: localhost (the browser on the host,
+# qSticky, Firefox's Torrent Control) and 127.0.0.1 (the browser on the host).
+# qBittorrent also accepts an address equal to the one the connection arrived
+# at, but host connections arrive at the container's own address, not 127.0.0.1.
+# The quotes are part of the value: in Qt's INI format an unquoted ";" starts a
+# comment (qBittorrent would read just "localhost"), and Qt writes it this way.
+set_config "$webui_section" "${webui_prefix}HostHeaderValidation" "true"
+set_config "$webui_section" "${webui_prefix}ServerDomains" '"localhost;127.0.0.1"'
 set_config "$webui_section" "${webui_prefix}AuthSubnetWhitelist" "192.168.0.0/16, 172.16.0.0/12, 10.0.0.0/8"
 set_config "$webui_section" "${webui_prefix}AuthSubnetWhitelistEnabled" "true"
 set_config "$webui_section" "${webui_prefix}LocalHostAuth" "false"
