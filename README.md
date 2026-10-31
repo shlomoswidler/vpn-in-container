@@ -4,7 +4,7 @@ A Docker Compose stack providing a privacy-focused, containerized browsing envir
 
 ## Features
 
-- **Firefox browser** accessible via web interface (noVNC) at `http://localhost:5800`
+- **Firefox browser** accessible via web interface (noVNC) at `http://localhost:5800`, with sound
 - **qBittorrent** with web UI at `http://localhost:9080`
 - **Automatic torrent handoff**: Download `.torrent` files in Firefox → qBittorrent auto-imports them
 - **Automatic port forwarding**: qSticky syncs the VPN's forwarded port to qBittorrent
@@ -161,6 +161,50 @@ docker compose stop
   - Settings: the single-window `FF_PREF_*` entries in `docker-compose.yml`,
     `config/firefox-autoconfig/`, `config/firefox-profile/customKeys.json` and
     `config/firefox-chrome/userChrome.css`.
+
+### Sound
+
+Sound from Firefox in the container plays in the browser tab that shows the web UI
+(http://localhost:5800). VNC clients get no sound.
+
+1. **Turn it on once:** open the side panel (the handle on the left edge of the web UI) and
+   click the speaker icon, or move the volume slider above 0. The first time, the volume
+   starts at 0, so a click anywhere else does not turn sound on.
+2. **After that, click once per visit:** the web UI remembers the setting (in your browser's
+   storage for localhost:5800). After every page load your browser still blocks sound until
+   you interact with the page (its autoplay policy), so sound comes back at your first click
+   or tap in the web UI. Keystrokes don't count.
+3. **Sites in the container:** Firefox there keeps its default autoplay setting (block
+   audible autoplay): a site plays sound once you click in it, on a play button for
+   example. Your clicks reach Firefox as real input, so nothing else is needed.
+
+The stream is raw 44.1 kHz stereo, about 1.4 Mbit/s, sent while sound is on (silence
+included), over the same loopback-only port 5800. Everyone viewing the web UI hears the same
+sound.
+
+Why the container's Firefox does not allow sites to autoplay sound
+(`media.autoplay.default` stays at Firefox's default, 1: block audible autoplay): with it
+allowed, any page, an ad included, could start making noise in every open web UI tab. The
+click a site needs is the one you would make anyway, and a per-site "allow" would not last,
+since permanent private browsing keeps no site permission past a restart. To allow it
+anyway, add `- FF_PREF_AUTOPLAY=media.autoplay.default=0` to the firefox service's
+`environment:` (tests/e2e/run.sh then checks that it reaches Firefox).
+
+What is tested automatically (see [Automated Tests](#automated-tests)), and what is not:
+
+- `tests/e2e/run.sh` scenario 9: in a throwaway container hardened like the service, a page's
+  1000 Hz (left) and 1500 Hz (right) tone, started by a click, reaches PulseAudio, the
+  recorder and the web UI's WebSocket unchanged, at the right rate and in whole samples,
+  with silence before the click and after the tone stops.
+- `tests/browser/run.sh`, in headless Chrome and Firefox: the image's audio player (blocked
+  before a gesture, then decoding the stream on the right channels at the set volume); and
+  the whole path through the real web UI of such a container, measured at the web UI's own
+  audio output: no sound before a gesture, the speaker icon on first use, the first click
+  on a later visit, and the tone from the container's page.
+- **Manual: actually hearing it.** The last step, from the browser to your Mac's speakers
+  (the output device, the system volume, the tab not muted), and Safari, are not tested.
+  Check once after setting up or upgrading: open http://localhost:5800, open the side panel,
+  click the speaker icon, then play something with sound in Firefox (any video) and listen.
 
 ### Configure Torrent Control (First Time Only)
 
@@ -344,8 +388,11 @@ fetches an unpinned BuildKit frontend and builds on Alpine 3.18.
 tests/stack/run.sh     # the running stack: VPN egress and kill switch, DNS, port forwarding,
                        # qSticky, qBittorrent (API, settings, watch folder), Firefox, Autoheal
                        # and its Docker socket proxy, loopback-only web UI ports
-tests/e2e/run.sh       # Firefox in throwaway containers: cursors, single window, private browsing
-tests/browser/run.sh   # the patched noVNC in headless Chrome and Firefox
+tests/e2e/run.sh       # Firefox in throwaway containers: cursors, single window, private browsing,
+                       # downloads, WebRTC, sound to the web UI's audio stream
+tests/browser/run.sh   # the web UI in headless Chrome and Firefox: the patched noVNC cursor,
+                       # the audio player, and sound through the real web UI of a throwaway
+                       # container
 tests/stack/recovery.sh        # DISRUPTIVE: restarts the VPN container and times the recovery
 tests/qbittorrent/download.sh  # a real multi-file download between two throwaway qBittorrent
                                # containers (no internet), checked by SHA-256 and recheck
@@ -529,6 +576,18 @@ docker compose down && docker compose up -d
 3. Verify `~/Downloads/vpn-in-container/downloads` (or `$DOWNLOADS_PATH/downloads`) exists and has
    correct permissions
 
+### No Sound in the Web UI
+
+1. No Audio section (speaker icon) in the side panel: the container was created before
+   `WEB_AUDIO=1`. `docker compose up -d` recreates it with the new setting; then reload
+   the web UI.
+2. The icon shows the speaker crossed out: click it once (see [Sound](#sound)). After each
+   reload, click anywhere in the web UI once.
+3. The icon is on but nothing is heard: check the volume slider, that the browser tab isn't
+   muted, and the Mac's output device and volume. In `docker compose logs firefox`, the
+   `[audiorecorder]` lines show "new client connected" when the web UI opens the stream
+   (PulseAudio, when it works, prints nothing; its lines would start with `[pulseaudio]`).
+
 ### Can't Access Web UIs
 
 1. Ensure ports 5800 and 9080 aren't used by other apps
@@ -578,11 +637,11 @@ vpn-in-container/
 │   ├── cursor-keyword.test.mjs        # node --test tests/
 │   ├── test_generate_native_theme.py  # python3 -m unittest discover -s tests
 │   ├── test_make_core_glyph_table.py
-│   ├── e2e/run.sh          # Real Firefox + VNC server cursor test (Docker)
+│   ├── e2e/run.sh          # Real Firefox in throwaway containers: cursors, windows, sound (Docker)
 │   ├── stack/run.sh        # Running stack: VPN, kill switch, ports, qBittorrent, Autoheal
 │   ├── qbittorrent/download.sh  # Isolated real download test for the qBittorrent image
 │   ├── qbittorrent/fresh-install.sh  # The init script on an empty /config (watch folder)
-│   └── browser/run.sh      # Patched noVNC in headless Chrome and Firefox
+│   └── browser/run.sh      # Patched noVNC and the audio player in headless Chrome and Firefox
 
 ~/Downloads/vpn-in-container/           # Host downloads directory (DOWNLOADS_PATH in .env)
 ├── downloads/              # Firefox downloads + .torrent file handoff
