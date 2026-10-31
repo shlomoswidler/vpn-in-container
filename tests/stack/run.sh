@@ -10,7 +10,9 @@
 #     UDP to the WireGuard endpoint
 #   - IPv6: the firewall drops it by default, and IPv6 egress from the VPN's
 #     network fails (or leaves through the tunnel), never from the host's
-#   - DNS goes through Gluetun and resolves
+#   - DNS goes through Gluetun and resolves; Gluetun forwards it over DNS over
+#     TLS through the tunnel, and the outside world sees the TLS provider's
+#     resolver, not the host's
 #   - Gluetun's forwarded port is qBittorrent's listening port, and qSticky
 #     restores it after it is changed
 #   - qBittorrent's WebUI, API and settings, and the .torrent watch-folder
@@ -109,6 +111,63 @@ public_ip() {
         sleep 3
     done
     return 1
+}
+
+# A DNS TXT query over UDP with the Python standard library (the images have no
+# dig): python3 -I -c "$DNS_TXT_PY" NAME SERVER prints one line per TXT record.
+DNS_TXT_PY='
+import random, socket, struct, sys
+name, server = sys.argv[1:]
+qid = random.randrange(65536)
+query = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0) + b"".join(
+    bytes([len(label)]) + label.encode() for label in name.rstrip(".").split(".")
+) + b"\0" + struct.pack(">HH", 16, 1)
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+    sock.settimeout(5)
+    sock.sendto(query, (server, 53))
+    data = sock.recv(4096)
+rid, flags, questions, answers = struct.unpack(">HHHH", data[:8])
+if rid != qid or flags & 0x000F:
+    sys.exit(f"bad answer: id {rid}, rcode {flags & 0x000F}")
+def skip_name(i):
+    while data[i]:
+        if data[i] & 0xC0 == 0xC0:
+            return i + 2
+        i += data[i] + 1
+    return i + 1
+i = 12
+for _ in range(questions):
+    i = skip_name(i) + 4
+for _ in range(answers):
+    i = skip_name(i)
+    rtype, _, _, length = struct.unpack(">HHIH", data[i:i + 10])
+    i += 10
+    if rtype == 16:
+        j, strings = i, []
+        while j < i + length:
+            strings.append(data[j + 1:j + 1 + data[j]].decode())
+            j += data[j] + 1
+        print(" ".join(strings))
+    i += length'
+# TXT records of NAME as seen through Gluetun's DNS from qBittorrent (the VPN's
+# network), or through the host's resolver: txt_lookup vpn|host NAME
+txt_lookup() {
+    if [[ "$1" == vpn ]]; then
+        docker exec "$QBT" python3 -I -c "$DNS_TXT_PY" "$2" 127.0.0.1
+    else
+        python3 -I -c "$DNS_TXT_PY" "$2" "$(awk '$1 == "nameserver" && $2 ~ /^[0-9.]+$/ { print $2; exit }' /etc/resolv.conf)"
+    fi
+}
+# The autonomous system number announcing an IPv4 or IPv6 address (Team
+# Cymru's DNS service, asked through the same path): asn_of vpn|host IP
+asn_of() {
+    local name
+    name=$(python3 -I -c '
+import ipaddress, sys
+address = ipaddress.ip_address(sys.argv[1])
+zone = "origin.asn.cymru.com" if address.version == 4 else "origin6.asn.cymru.com"
+print(address.reverse_pointer.rsplit(".", 2)[0] + "." + zone)' "$2") || return 1
+    txt_lookup "$1" "$name" | awk -F' [|] ' 'NR == 1 { print $1 }'
 }
 
 qbt_preferences() { curl -s --max-time 10 "$QBT_URL/api/v2/app/preferences"; }
@@ -372,6 +431,135 @@ for container in "$QBT" "$FIREFOX"; do
         fail "$container DNS: $(docker exec "$container" grep nameserver /etc/resolv.conf | paste -sd ' ' -)"
     fi
 done
+# Gluetun's effective DNS settings, from the summary it prints at startup (the
+# v3.41 variables are DNS_SERVER, DNS_UPSTREAM_RESOLVER_TYPE and
+# DNS_UPSTREAM_RESOLVERS): prints "<forwarder on> <type> <resolvers,...>".
+vpn_log=$(docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' "$VPN")" "$VPN" 2>&1 || true)
+dns_settings=$(python3 -I -c '
+import re, sys
+lines = sys.stdin.read().splitlines()
+def depth(line):
+    match = re.search("[├└]── ", line)
+    return match.start() if match else -1
+def text(line):
+    return line[depth(line) + 4:].strip()
+starts = [i for i, line in enumerate(lines) if depth(line) >= 0 and text(line) == "DNS settings:"]
+if not starts:
+    sys.exit("no DNS settings in the startup summary")
+section = []
+for line in lines[starts[-1] + 1:]:
+    if depth(line) <= depth(lines[starts[-1]]):
+        break
+    section.append(line)
+values = {text(l).split(": ")[0]: text(l).split(": ", 1)[1] for l in section if ": " in text(l)}
+resolvers = []
+for i, line in enumerate(section):
+    if text(line) == "Upstream resolvers:":
+        for child in section[i + 1:]:
+            if depth(child) <= depth(line):
+                break
+            resolvers.append(text(child).lower())
+print(values.get("DNS forwarder server enabled", "?"), values.get("Upstream resolver type", "?"),
+      ",".join(resolvers) or "?")' <<<"$vpn_log" 2>&1 || true)
+read -r dns_forwarder dns_type dns_resolvers <<<"$dns_settings"
+dns_ready=$(python3 -I -c '
+import sys
+lines = sys.stdin.read().splitlines()
+summary = max((i for i, line in enumerate(lines) if "DNS settings:" in line), default=-1)
+print("yes" if summary >= 0 and any(line.endswith("[dns] ready") for line in lines[summary:]) else "no")' \
+    <<<"$vpn_log")
+if [[ "$dns_forwarder" == yes && "$dns_type" == dot && "$dns_resolvers" != "?" && "$dns_ready" == yes ]]; then
+    pass "Gluetun's DNS server is on and ready, upstream DNS over TLS to $dns_resolvers"
+else
+    fail "Gluetun DNS settings: '$dns_settings' (want: yes dot <resolvers>), ready: $dns_ready"
+fi
+# Autonomous system number and DNS over TLS servers of the upstream providers
+# this test knows (from qdm12/dns, the library Gluetun v3.41.3 uses):
+# dot_provider NAME prints "<ASN> <server IP>...".
+dot_provider() {
+    case "$1" in
+        cloudflare) echo "13335 1.1.1.1 1.0.0.1" ;;
+        *) return 1 ;;
+    esac
+}
+provider_asns=""
+dot_servers=""
+for provider in ${dns_resolvers//,/ }; do
+    if info=$(dot_provider "$provider"); then
+        provider_asns="$provider_asns ${info%% *}"
+        dot_servers="$dot_servers ${info#* }"
+    else
+        fail "no DNS over TLS servers known for the upstream provider '$provider'"
+    fi
+done
+# Gluetun holds TLS connections (port 853) to the provider from the tunnel's
+# address. A lookup of a new name first makes it use them.
+tun_addr=$(docker exec "$VPN" ip -4 -o addr show dev "${tun_if:-none}" 2>/dev/null |
+    awk '{ split($4, a, "/"); print a[1]; exit }' || true)
+dot_connection=""
+for _ in 1 2 3; do
+    docker exec "$QBT" getent hosts "$TEST_ID-$RANDOM.example.com" >/dev/null 2>&1 || true
+    connections=$(docker exec "$VPN" netstat -tn 2>/dev/null || true)
+    for server in $dot_servers; do
+        dot_connection=$(awk -v local="$tun_addr" -v remote="$server:853" \
+            '$4 ~ "^" local ":" && $5 == remote && $6 == "ESTABLISHED" { print $4 " -> " $5; exit }' \
+            <<<"$connections")
+        [[ -n "$dot_connection" ]] && break
+    done
+    [[ -n "$dot_connection" ]] && break
+    sleep 2
+done
+if [[ -n "$tun_addr" && -n "$dot_connection" ]]; then
+    pass "Gluetun's DNS over TLS connection to $dns_resolvers goes through the tunnel ($dot_connection)"
+else
+    fail "no DNS over TLS connection from the tunnel address '$tun_addr' to:$dot_servers"
+fi
+# Which resolver the outside world sees: Akamai's whoami.ds.akahelp.net
+# answers with the resolver that asked ("ns") and the client subnet it passed
+# on ("ecs"). Through 127.0.0.1 that must be the DNS over TLS provider, and it
+# must differ from what the host's own resolver shows.
+vpn_whoami=$(txt_lookup vpn whoami.ds.akahelp.net 2>/dev/null || true)
+host_whoami=$(txt_lookup host whoami.ds.akahelp.net 2>/dev/null || true)
+vpn_ns=$(awk '$1 == "ns" { print $2; exit }' <<<"$vpn_whoami")
+host_ns=$(awk '$1 == "ns" { print $2; exit }' <<<"$host_whoami")
+vpn_ns_asn=""
+host_ns_asn=""
+[[ -n "$vpn_ns" ]] && vpn_ns_asn=$(asn_of vpn "$vpn_ns" 2>/dev/null || true)
+[[ -n "$host_ns" ]] && host_ns_asn=$(asn_of host "$host_ns" 2>/dev/null || true)
+resolver_verdict=$(python3 -I -c '
+import ipaddress, sys
+(asns, vpn_whoami, vpn_asn, host_whoami, host_asn, host_ip, vpn_ip, providers) = sys.argv[1:]
+def parse(whoami):
+    fields = dict(line.split(" ", 1) for line in whoami.splitlines() if " " in line)
+    ecs = fields.get("ecs", "")
+    return fields.get("ns", ""), "/".join(ecs.split("/")[:2]) if ecs else ""
+vpn_ns, vpn_ecs = parse(vpn_whoami)
+host_ns, host_ecs = parse(host_whoami)
+if not vpn_ns:
+    sys.exit(f"FAIL no whoami answer through 127.0.0.1: {vpn_whoami!r}")
+if vpn_asn not in asns.split():
+    sys.exit(f"FAIL the resolver seen through 127.0.0.1 is {vpn_ns} (AS{vpn_asn}), not {providers} (AS{asns.strip()})")
+if vpn_ecs and host_ip and ipaddress.ip_address(host_ip) in ipaddress.ip_network(vpn_ecs, strict=False):
+    sys.exit(f"FAIL the resolver passed on the host network {vpn_ecs}")
+if not host_ns:
+    sys.exit(f"FAIL inconclusive: no whoami answer through the host resolver: {host_whoami!r}")
+# The client subnet tells the two paths apart when both pass one on; without
+# one, only resolvers of different operators do.
+if vpn_ecs and host_ecs:
+    if vpn_ecs == host_ecs:
+        sys.exit(f"FAIL through 127.0.0.1 the resolver passed on the host resolver client subnet {vpn_ecs}")
+elif not vpn_ecs and not host_ecs and (not host_asn or host_asn == vpn_asn):
+    sys.exit(f"FAIL inconclusive: no client subnet on either path, host resolver AS {host_asn!r}")
+covers = vpn_ecs and vpn_ip and ipaddress.ip_address(vpn_ip) in ipaddress.ip_network(vpn_ecs, strict=False)
+subnet = f", client subnet {vpn_ecs}" + (" (the VPN exit network)" if covers else "") if vpn_ecs else ""
+print(f"OK {vpn_ns} (AS{vpn_asn}, {providers}){subnet}")' \
+    "$provider_asns" "$vpn_whoami" "$vpn_ns_asn" "$host_whoami" "$host_ns_asn" "$host_ip" "$vpn_ip" \
+    "$dns_resolvers" 2>&1 || true)
+if [[ "$resolver_verdict" == OK* ]]; then
+    pass "resolver seen through 127.0.0.1: ${resolver_verdict#OK }, not the host's resolver"
+else
+    fail "resolver identity: ${resolver_verdict#FAIL }"
+fi
 
 echo "== port forwarding and qSticky"
 vpn_status=$(docker exec -e GLUETUN_API_KEY "$QBT" sh -c \
