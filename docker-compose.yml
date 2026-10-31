@@ -45,7 +45,11 @@ services:
       # Opt-in marker for this project's autoheal instance (see autoheal service).
       # Scopes autoheal to these siblings only, never other stacks on this host.
       - "autoheal=true"
-    restart: always
+    # Every service uses unless-stopped: Docker restarts a container that exits, and after a
+    # reboot or a Docker restart it starts those that were running, but not after
+    # `docker compose stop`. With `always` on only some services, a stopped stack came back
+    # after a reboot as the VPN (and Autoheal) alone, with the web UI ports leading nowhere.
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "/gluetun-entrypoint", "healthcheck"]
       interval: 15s
@@ -243,7 +247,8 @@ services:
     # Pinned by tag and digest; upgrade deliberately and run tests/stack/run.sh.
     image: willfarrell/autoheal:latest@sha256:c4227b7a25b8ef08829ad3ad440af3a821e4277c9b1b2050a3f671ad9d87bfc6
     container_name: autoheal
-    restart: always
+    # unless-stopped, like every service (see vpn).
+    restart: unless-stopped
     # No Docker socket: autoheal reaches the Docker API only through autoheal-proxy, on an
     # internal network with no route out.
     networks:
@@ -274,7 +279,8 @@ services:
     # Pinned by tag and digest; upgrade deliberately and run tests/stack/run.sh.
     image: lscr.io/linuxserver/socket-proxy:3.4.7-r0-ls104@sha256:4e5e59efd3338205561c54262581992036e5a36ccca97d487b1d4ec41f9adc58
     container_name: autoheal-proxy
-    restart: always
+    # unless-stopped, like every service (see vpn).
+    restart: unless-stopped
     # Root inside, with no capabilities: the socket's group differs per host (root on
     # OrbStack, docker on Linux). The entrypoint writes its rendered config to /run.
     read_only: true
@@ -293,7 +299,7 @@ services:
     networks:
       - autoheal-docker
     # No autoheal label: autoheal restarts through this proxy, so it cannot heal it.
-    # restart: always brings HAProxy back if it exits.
+    # The restart policy brings HAProxy back if it exits.
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2375/_ping"]
       interval: 30s
