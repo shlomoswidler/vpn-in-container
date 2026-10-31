@@ -55,7 +55,8 @@ PROBE_IMAGE=python:3.13.18-alpine3.24@sha256:7984cf56ceaddebe4fefeb75d64000b9f45
 WORK=$(mktemp -d)
 
 cleanup() {
-    docker rm -f "$CONTAINER-web" "$CONTAINER-stun" "$CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f "$CONTAINER-web" "$CONTAINER-stun" "$CONTAINER-novnc" "$CONTAINER" \
+        >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -100,6 +101,15 @@ if [[ " ${SERVICE_ARGS[*]} " != *" $NATIVE_CSS_SOURCE:"* ]]; then
     echo "FAIL: the firefox service does not mount $NATIVE_CSS_SOURCE" >&2
     exit 1
 fi
+
+# The firefox service mounts config/novnc/cursor.js over the image's, which would hide any
+# change a new image made to it. The image's own file (from a container that is created, never
+# started, so no mount covers it) must still be the one config/novnc/cursor.js.patch was made
+# from (config/cursors/README.md).
+docker create --name "$CONTAINER-novnc" "$IMAGE" >/dev/null
+docker cp -q "$CONTAINER-novnc:/opt/noVNC/core/util/cursor.js" "$WORK/image-cursor.js"
+docker rm "$CONTAINER-novnc" >/dev/null
+python3 -I "$REPO/tests/novnc_cursor_patch.py" "$WORK/image-cursor.js"
 
 # The display size the firefox service asks for, as "WIDTHxHEIGHT".
 display_size() {

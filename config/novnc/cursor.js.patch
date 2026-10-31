@@ -1,0 +1,29 @@
+--- a/core/util/cursor.js
++++ b/core/util/cursor.js
+@@ -5,6 +5,7 @@
+  */
+ 
+ import { supportsCursorURIs, isTouchDevice } from './browser.js';
++import { nativeCursorKeyword } from './cursor-keyword.js';
+ 
+ const useFallback = !supportsCursorURIs || isTouchDevice;
+ 
+@@ -83,6 +84,18 @@
+             return;
+         }
+ 
++        // Marker cursors and Openbox's core glyphs stand for a CSS cursor
++        // keyword: show the browser's own native cursor for it. The fallback
++        // (drawn canvas) mode has no native cursor to show, so it shows none.
++        const keyword = nativeCursorKeyword(rgba, hotx, hoty, w, h);
++        if (keyword !== null) {
++            this.clear();
++            if (!useFallback) {
++                this._target.style.cursor = keyword;
++            }
++            return;
++        }
++
+         this._position.x = this._position.x + this._hotSpot.x - hotx;
+         this._position.y = this._position.y + this._hotSpot.y - hoty;
+         this._hotSpot.x = hotx;

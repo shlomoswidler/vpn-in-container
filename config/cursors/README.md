@@ -80,6 +80,50 @@ tests/e2e/run.sh       # real Firefox + VNC server: markers, prefs, Openbox drag
 tests/browser/run.sh   # the image's noVNC with the patch, in headless Chrome and Firefox
 ```
 
-If noVNC's `core/util/cursor.js` changed upstream, re-apply the patch to the new
-file: it adds the `nativeCursorKeyword` import from `cursor-keyword.js` and the
-keyword check at the top of `Cursor.change()`.
+### The patched cursor.js
+
+The firefox service mounts `config/novnc/cursor.js` over the image's
+`/opt/noVNC/core/util/cursor.js`, so it would hide whatever a new image changed
+in that file. Three files record how the overlay was made:
+
+- `config/novnc/cursor.js.upstream.sha256`: the checksum of the image's file
+  (noVNC v1.6.0's and v1.7.0's, unchanged; jlesage/firefox v26.09.1 ships it).
+- `config/novnc/cursor.js.patch`: the change, as `diff -u` output. It adds the
+  `nativeCursorKeyword` import from `cursor-keyword.js` and the keyword check at
+  the top of `Cursor.change()`, and removes nothing.
+- `config/novnc/cursor.js`: the image's file plus the patch.
+
+`tests/browser/run.sh` and `tests/e2e/run.sh` copy the image's own file out of a
+container that is never started (no mount covers it) and stop with a `FAIL`
+line if its checksum is not the recorded one, or if the patch does not turn it
+into `config/novnc/cursor.js` exactly (`tests/novnc_cursor_patch.py`). The unit
+tests check the second part without the image: taking the patch back out of
+`config/novnc/cursor.js` must give a file with the recorded checksum. So
+`config/novnc/cursor.js` cannot be edited without updating the patch.
+
+If the new image's `cursor.js` changed, re-apply the patch to it, review the
+result, and record the new file. From the repository root, after changing the
+image in `docker-compose.yml`:
+
+```bash
+IMAGE=$(docker compose config --format json | python3 -I -c \
+    'import json, sys; print(json.load(sys.stdin)["services"]["firefox"]["image"])')
+dir=$(mktemp -d)
+container=$(docker create "$IMAGE")
+docker cp "$container:/opt/noVNC/core/util/cursor.js" "$dir/cursor.js"
+docker rm "$container"
+# What upstream changed: the old file is the overlay with the patch taken back out.
+patch -R -s -o "$dir/old-cursor.js" config/novnc/cursor.js config/novnc/cursor.js.patch
+diff -u "$dir/old-cursor.js" "$dir/cursor.js"
+patch -o config/novnc/cursor.js "$dir/cursor.js" config/novnc/cursor.js.patch
+# Resolve any rejected hunk by hand in config/novnc/cursor.js, then record both files:
+diff -u --label a/core/util/cursor.js --label b/core/util/cursor.js \
+    "$dir/cursor.js" config/novnc/cursor.js > config/novnc/cursor.js.patch
+printf '%s  core/util/cursor.js\n' "$(shasum -a 256 < "$dir/cursor.js" | cut -d' ' -f1)" \
+    > config/novnc/cursor.js.upstream.sha256
+python3 -m unittest discover -s tests && tests/browser/run.sh && tests/e2e/run.sh
+```
+
+(`diff` exits 1 when the files differ, which they do.) noVNC is licensed under
+the Mozilla Public License 2.0: `config/novnc/cursor.js` and its patch stay
+under it, as the file's header says.

@@ -35,6 +35,10 @@ mkdir -p "$WORK/site/core/util" "$WORK/profiles"
 CONTAINER=$(docker create "$IMAGE")
 docker cp -q "$CONTAINER:/opt/noVNC/core" "$WORK/site/"
 docker cp -q "$CONTAINER:/opt/noVNC/vendor" "$WORK/site/"
+# The overlay below replaces the image's cursor.js, which would hide any change a new image
+# made to it: first check that the image's file is still the one config/novnc/cursor.js.patch
+# was made from, and that the overlay is it plus the patch (config/cursors/README.md).
+python3 -I "$REPO/tests/novnc_cursor_patch.py" "$WORK/site/core/util/cursor.js"
 for file in cursor.js cursor-keyword.js core-glyphs.js; do
     cp "$REPO/config/novnc/$file" "$WORK/site/core/util/$file"
 done
