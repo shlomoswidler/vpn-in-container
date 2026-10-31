@@ -53,6 +53,13 @@ class HardeningArgsTests(unittest.TestCase):
             ],
         )  # fmt: skip
 
+    def test_pid_and_memory_limits(self):
+        # As `docker compose config` resolves them: pids_limit a number, mem_limit bytes.
+        service = {"pids_limit": 512, "mem_limit": "2147483648"}
+        self.assertEqual(
+            self.hardening_args(service), ["--pids-limit", "512", "--memory", "2147483648"]
+        )
+
     def test_the_command_prints_one_argument_per_line(self):
         result = run("app", {"app": {"cap_drop": ["ALL"]}, "other": {"cap_add": ["KILL"]}})
         self.assertEqual(result.returncode, 0, result.stderr)

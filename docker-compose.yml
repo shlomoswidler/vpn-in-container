@@ -26,6 +26,13 @@ services:
     # image's init starts as root and drops to its user with syscalls, which this allows.
     security_opt:
       - no-new-privileges:true
+    # Limits, so a runaway process (a fork loop, a leak) stops in its own container instead
+    # of slowing the host. Each is set well above the peak measured (cgroup memory.peak and
+    # pids.peak, which counts threads) while tests/stack/run.sh and tests/e2e/run.sh ran:
+    # an out-of-memory kill restarts the container, which normal use must never cause.
+    # Gluetun: 97 MiB, 29 tasks.
+    pids_limit: 256
+    mem_limit: 512m
     devices:
       - /dev/net/tun:/dev/net/tun
     # Loopback only: neither web UI has a password. Without a host IP, Docker binds every
@@ -166,6 +173,12 @@ services:
       - NET_BIND_SERVICE
     security_opt:
       - no-new-privileges:true  # see vpn
+    # See vpn. Firefox runs a process per site: 20 tabs of busy sites (news, video, maps)
+    # peaked at 4.3 GiB and 1,311 tasks, against 0.5 GiB and 234 tasks with one tab. Its
+    # /dev/shm (shm_size, a tmpfs) also counts against mem_limit when used (0 here, even at
+    # 20 tabs). An out-of-memory kill would close every tab.
+    pids_limit: 4096
+    mem_limit: 8g
     labels:
       # Opt-in marker for this project's autoheal instance (see autoheal service).
       # Scopes autoheal to these siblings only, never other stacks on this host.
@@ -220,6 +233,10 @@ services:
       - KILL
     security_opt:
       - no-new-privileges:true  # see vpn
+    # See vpn. 313 MiB, 37 tasks, seeding 2 of 19 torrents (53 GiB). The cached pages of the
+    # files it reads count too, but the kernel frees those under the limit.
+    pids_limit: 512
+    mem_limit: 2g
     volumes:
       # qBittorrent configuration
       - ./config/qbittorrent:/config
@@ -286,6 +303,9 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true  # see vpn
+    # See vpn. Python: 85 MiB, 9 tasks.
+    pids_limit: 64
+    mem_limit: 256m
     labels:
       # Opt-in marker for this project's autoheal instance (see autoheal service).
       # Scopes autoheal to these siblings only, never other stacks on this host.
@@ -350,6 +370,9 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
+    # See vpn. HAProxy starts a thread per CPU (16 here): 34 MiB, 24 tasks.
+    pids_limit: 256
+    mem_limit: 128m
     environment:
       - LOG_LEVEL=info
     volumes:
