@@ -23,6 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 ENV_FILE = REPO_ROOT / ".env.example"
 GENERATOR = REPO_ROOT / "config" / "cursors" / "generate_native_theme.py"
+NOVNC_PATCH = REPO_ROOT / "tests" / "novnc_patch.py"
 PROXY_TEMPLATE = REPO_ROOT / "config" / "autoheal-proxy" / "haproxy.cfg"
 
 # name:tag@sha256:<digest>. The name may include a registry host and port; the tag is the
@@ -215,6 +216,14 @@ def generator_nominal_size() -> int:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.NOMINAL_SIZE
+
+
+def novnc_overlays() -> tuple:
+    """The patched noVNC files tests/novnc_patch.py checks against the image's."""
+    spec = importlib.util.spec_from_file_location("novnc_patch", NOVNC_PATCH)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.OVERLAYS
 
 
 def run_compose_config(env_file: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
@@ -621,6 +630,24 @@ class ComposeTests(unittest.TestCase):
         # The image's default is 0: no PulseAudio server, no recorder, no /websockify-audio,
         # and the web UI hides its audio controls, so pages play without sound.
         self.assertEqual(self.services["firefox"].get("environment", {}).get("WEB_AUDIO"), "1")
+
+    def test_firefox_mounts_each_patched_novnc_file_read_only(self):
+        # Each file tests/novnc_patch.py checks against the image's is mounted over that file,
+        # and no other file is mounted over the image's noVNC client: an overlay without the
+        # check, or a check of a file nothing mounts, fails here.
+        novnc = {
+            volume["target"]: volume
+            for volume in self.services["firefox"].get("volumes", [])
+            if volume.get("target", "").startswith("/opt/noVNC/")
+        }
+        overlays = {f"/opt/noVNC/{overlay.image_path}": overlay for overlay in novnc_overlays()}
+        # Files of the repo's own, not overlays of the image's: nothing to check them against.
+        own = {"/opt/noVNC/core/util/cursor-keyword.js", "/opt/noVNC/core/util/core-glyphs.js"}
+        self.assertEqual(set(novnc), set(overlays) | own)
+        for target, overlay in overlays.items():
+            with self.subTest(target=target):
+                self.assertEqual(novnc[target]["source"], str(overlay.path))
+                self.assertIs(novnc[target].get("read_only"), True)
 
     def test_firefox_cursor_size_matches_the_theme(self):
         size = self.services["firefox"].get("environment", {}).get("XCURSOR_SIZE")

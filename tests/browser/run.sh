@@ -17,7 +17,9 @@
 # hardening, WEB_AUDIO included, and no network), shows tests/e2e/audio-page.html;
 # tunnel.py makes its web UI reachable on 127.0.0.1, and web-ui-audio.mjs loads
 # it and checks, at the web UI's own audio output, the first-use and the
-# returning-user paths (see that file).
+# returning-user paths, and what a restart of the container (which the same tab
+# reconnects to) does to sound that was on, and to sound that was muted (see
+# that file).
 #
 # Usage: tests/browser/run.sh   (needs docker, python3, node, and Google
 #        Chrome and/or Firefox in /Applications)
@@ -65,10 +67,15 @@ mkdir -p "$WORK/site/app"
 for file in pcm-player.min.js unmute.min.js; do
     docker cp -q "$CONTAINER:/opt/noVNC/app/$file" "$WORK/site/app/"
 done
-# The overlay below replaces the image's cursor.js, which would hide any change a new image
-# made to it: first check that the image's file is still the one config/novnc/cursor.js.patch
-# was made from, and that the overlay is it plus the patch (config/cursors/README.md).
-python3 -I "$REPO/tests/novnc_cursor_patch.py" "$WORK/site/core/util/cursor.js"
+# The overlay below replaces the image's cursor.js, and the firefox service also mounts
+# config/novnc/ui.js over the image's app/ui.js (the throwaway container below gets that
+# mount too), which would hide any change a new image made to them: first check that the
+# image's files are still the ones config/novnc/cursor.js.patch and ui.js.patch were made
+# from, and that each overlay is its file plus its patch (config/cursors/README.md).
+mkdir -p "$WORK/image-novnc/core/util" "$WORK/image-novnc/app"
+cp "$WORK/site/core/util/cursor.js" "$WORK/image-novnc/core/util/"
+docker cp -q "$CONTAINER:/opt/noVNC/app/ui.js" "$WORK/image-novnc/app/"
+python3 -I "$REPO/tests/novnc_patch.py" "$WORK/image-novnc"
 for file in cursor.js cursor-keyword.js core-glyphs.js; do
     cp "$REPO/config/novnc/$file" "$WORK/site/core/util/$file"
 done
@@ -128,7 +135,7 @@ failures=0
 browsers=0
 
 # web-ui-audio.mjs's cases.
-WEB_UI_CASES=10
+WEB_UI_CASES=19
 
 # report LABEL RESULT COUNT: prints ok or FAIL for a harness RESULT of COUNT cases.
 report() {
@@ -191,7 +198,7 @@ web_ui_audio() {
         return
     fi
     result=$(node "$BROWSER_DIR/web-ui-audio.mjs" "$1" "$2" "$WORK/profiles/$1-web-ui" \
-        "$(free_port)" "$WEB_UI_URL") || true
+        "$(free_port)" "$WEB_UI_URL" "$WEB_CONTAINER") || true
     report "$3 web UI" "$result" "$WEB_UI_CASES"
     stop_web_ui
 }

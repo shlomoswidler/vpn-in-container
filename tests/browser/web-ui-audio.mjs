@@ -14,14 +14,24 @@
 // after a reload: no stream before a gesture, and the first click anywhere (here the
 // handle) turns audio back on; the tone plays again.
 //
+// Reconnect, while the tone plays: the container restarts (`docker restart`, as when autoheal
+// restarts it, or Gluetun with it) and the same tab, never reloaded, reconnects on its own.
+// With no click in the tab, audio must come back on (the stream open, the speaker icon on) and
+// the tone, started this time from inside the container (xdotool), must play again. Muted:
+// after the speaker icon mutes audio, another restart and reconnect must leave it off, and
+// the tone must stay silent.
+//
 // Prints {"total", "failed", "failures", "cases"}, or {"error"} if the run could not finish.
-// Usage: node web-ui-audio.mjs chrome|firefox BINARY PROFILE_DIR PORT URL
+// Usage: node web-ui-audio.mjs chrome|firefox BINARY PROFILE_DIR PORT URL CONTAINER
 
+import { execFile } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { promisify } from 'node:util';
 
 import { launch, waitFor } from './browser.mjs';
 
-const [kind, binary, profile, port, url] = process.argv.slice(2);
+const [kind, binary, profile, port, url, container] = process.argv.slice(2);
+const run = promisify(execFile);
 const LEFT_HZ = 1000;
 const RIGHT_HZ = 1500;
 // The page's tone (amplitude 0.25) at the volume the speaker icon restores (90 %).
@@ -219,6 +229,90 @@ async function clickRemotePage(session) {
     await clickElement(session, '#noVNC_container canvas');
 }
 
+// Runs a command in the container's X session as the app user (run.sh's in_x); its output.
+async function inX(...args) {
+    const { stdout } = await run('docker', ['exec', '-u', '1000', '-e', 'DISPLAY=:0', container,
+        ...args]);
+    return stdout.trim();
+}
+
+// The title of the container's Firefox window, or '' while there is none.
+async function remoteTitle() {
+    try {
+        const id = (await inX('xdotool', 'search', '--classname', 'Navigator')).split('\n')[0];
+        return id ? await inX('xdotool', 'getwindowname', id) : '';
+    } catch {
+        return '';
+    }
+}
+
+// Polls the container's Firefox window title until TEST(title) holds; rejects after TIMEOUT_MS.
+async function remoteTitleUntil(test, what, timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        const title = await remoteTitle();
+        if (test(title)) {
+            return title;
+        }
+        if (Date.now() > deadline) {
+            throw new Error(`${what}: not within ${timeoutMs} ms (title "${title}")`);
+        }
+        await sleep(500);
+    }
+}
+
+// Clicks the remote page from inside the container (xdotool, in the middle of the display),
+// so that the web UI's tab gets no click: it toggles the page's tone. Resolves to whether the
+// page's title then says it is playing (PLAYING true) or stopped (PLAYING false).
+async function clickInContainer(playing) {
+    const [width, height] = (await inX('xdotool', 'getdisplaygeometry')).split(' ').map(Number);
+    await inX('xdotool', 'mousemove', String(Math.round(width / 2)),
+        String(Math.round(height / 2)), 'click', '1');
+    const expected = playing ? 'audio-playing state=running' : 'audio-stopped';
+    return remoteTitleUntil(title => title.includes(expected), `the page ${expected}`, 10000)
+        .then(() => true, () => false);
+}
+
+// Restarts the container while SESSION shows its web UI, and waits until the same tab has
+// reconnected on its own and the container's Firefox shows audio-page.html again. Resolves to
+// whether the tab is the same document as before (not reloaded) and connected.
+async function restartContainer(session) {
+    await session.evaluate('window.__beforeRestart = true');
+    // Handled at once: the waits below run while the restart does.
+    const restarted = run('docker', ['restart', container]).then(() => null, err => err);
+    await waitFor(session, '!document.documentElement.classList.contains("noVNC_connected")',
+        'the web UI losing its connection to the restarting container', 60000);
+    const error = await restarted;
+    if (error) {
+        throw new Error(`docker restart ${container}: ${error.message}`);
+    }
+    await waitFor(session, 'document.documentElement.classList.contains("noVNC_connected")',
+        'the web UI reconnecting after the restart', 120000);
+    await remoteTitleUntil(title => title.includes('e2e audio page'),
+        'the container\'s Firefox showing audio-page.html after the restart', 120000);
+    return session.evaluate('window.__beforeRestart === true && ' +
+        'document.documentElement.classList.contains("noVNC_connected")');
+}
+
+function mutedState(state) {
+    return state.enabled === '0' && state.volume === '0' && state.icon.includes('fa-volume-mute') &&
+        !state.audioSockets.some(a => a.readyState === 1);
+}
+
+// Clicks the speaker icon until audio is muted (a click toggles it), at most twice: the icon
+// alone can show muted while the saved setting and the slider still say on.
+async function muteWithSpeakerIcon(session) {
+    await setPanel(session, true);
+    for (let clicks = 0; clicks < 2; clicks++) {
+        if (mutedState(await session.evaluate(STATE))) {
+            break;
+        }
+        await clickElement(session, '#noVNC_audio_button');
+        await sleep(500);
+    }
+    await setPanel(session, false);
+}
+
 async function main(session) {
     await session.addPreloadScript(tapAudio.toString());
 
@@ -275,7 +369,46 @@ async function main(session) {
     measured = await measureUntil(session, isTone, 15000);
     record('returning: the page\'s tone plays in the browser', isTone(measured),
         rounded(measured));
-    await clickRemotePage(session); // stops the tone
+
+    // Reconnect: the container restarts while the tone plays; no click in the tab from here on.
+    record('reconnect: the same tab reconnects after the container restarts',
+        await restartContainer(session), {});
+    await waitFor(session, AUDIO_ON, 'the audio stream reopening', 15000).catch(() => {});
+    state = await session.evaluate(STATE);
+    record('reconnect: audio comes back on with no click', state.enabled === '1' &&
+        audioOn(state), state);
+    measured = await measureUntil(session, isSilent, 5000);
+    record('reconnect: silence before the page plays again', isSilent(measured),
+        rounded(measured));
+    let playing = await clickInContainer(true);
+    measured = await measureUntil(session, isTone, 15000);
+    state = await session.evaluate(STATE);
+    record('reconnect: the page\'s tone plays again with no click in the tab',
+        playing && isTone(measured), {
+            playing, ...rounded(measured), expectedRms: round(EXPECTED_RMS),
+            bytes: state.audioSockets.map(a => a.bytes),
+        });
+    const stopped = await clickInContainer(false);
+    measured = await measureUntil(session, isSilent, 10000);
+    record('reconnect: silence after the page stops', stopped && isSilent(measured),
+        { stopped, ...rounded(measured) });
+
+    // Muted: the speaker icon turns audio off before another restart; it must stay off.
+    await muteWithSpeakerIcon(session);
+    state = await session.evaluate(STATE);
+    record('muted: the speaker icon mutes audio before the restart', mutedState(state), state);
+    record('muted: the same tab reconnects after the container restarts',
+        await restartContainer(session), {});
+    // As long as the reconnect case above gives audio to come back on: it must not.
+    await waitFor(session, AUDIO_ON, 'the audio stream reopening', 15000).catch(() => {});
+    state = await session.evaluate(STATE);
+    record('muted: audio stays off after the reconnect', mutedState(state), state);
+    playing = await clickInContainer(true);
+    // As long as the reconnect case above waits for the tone; any sound in it fails the case.
+    measured = await measureUntil(session, m => !isSilent(m), 15000);
+    record('muted: the page\'s tone stays silent', playing && isSilent(measured),
+        { playing, ...rounded(measured) });
+    await clickInContainer(false);
 }
 
 let session;

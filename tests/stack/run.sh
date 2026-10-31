@@ -27,7 +27,8 @@
 #     hand-off (a private, tracker-less test torrent: no network contact)
 #   - qBittorrent's Host-header check (the DNS rebinding defense) refuses any
 #     name but localhost and 127.0.0.1, and its clients' URLs still work
-#   - the Firefox web UI, private browsing and the single window
+#   - the Firefox web UI (serving the patched noVNC files, ui.js with the
+#     content hash that busts caches), private browsing and the single window
 #   - Autoheal reaches Docker only through its socket proxy, which lets it list
 #     containers and restart one, and refuses everything else (create, inspect,
 #     exec, stop)
@@ -953,6 +954,28 @@ if [[ "$code" == 200 ]]; then
     pass "web UI answers at $FIREFOX_URL"
 else
     fail "web UI at $FIREFOX_URL: HTTP $code"
+fi
+# The web UI serves the patched noVNC files the service mounts (config/cursors/README.md),
+# byte for byte (neither has a placeholder nginx substitutes), with no-cache.
+for novnc_file in core/util/cursor.js app/ui.js; do
+    served="$WORK/served-${novnc_file##*/}"
+    novnc_headers=$(curl -s -D - -o "$served" --max-time 10 "$FIREFOX_URL/$novnc_file" || true)
+    if cmp -s "$served" "$REPO/config/novnc/${novnc_file##*/}" &&
+        grep -qi '^cache-control: no-cache' <<<"$novnc_headers"; then
+        pass "web UI serves config/novnc/${novnc_file##*/} as /$novnc_file, with no-cache"
+    else
+        fail "web UI's /$novnc_file is not config/novnc/${novnc_file##*/} with no-cache"
+    fi
+done
+# index.html loads ui.js with the content hash of /opt/noVNC, which changes when a mounted
+# file does, so a browser that has an older ui.js cached fetches the new one.
+web_version=$(curl -s --max-time 10 "$FIREFOX_URL/webdata.json" |
+    python3 -I -c 'import json, sys; print(json.load(sys.stdin)["webUniqueVersion"])' || true)
+if [[ -n "$web_version" ]] &&
+    curl -s --max-time 10 "$FIREFOX_URL/" | grep -qF "./app/ui.js?v=$web_version\""; then
+    pass "index.html loads ui.js with the web UI's content hash ($web_version)"
+else
+    fail "index.html does not load ./app/ui.js?v=<webUniqueVersion> ('$web_version')"
 fi
 if docker exec "$FIREFOX" grep -qxF 'user_pref("browser.privatebrowsing.autostart", true);' \
     /config/profile/prefs.js; then
