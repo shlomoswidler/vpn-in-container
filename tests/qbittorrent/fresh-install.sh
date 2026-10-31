@@ -15,6 +15,11 @@
 #     qBittorrent removes the file from /watch
 #   - after a restart the script leaves the file alone and /watch is still
 #     watched
+#   - docker stop lets qBittorrent exit cleanly, before the stop timeout
+#
+# The container gets the service's security options and capabilities
+# (tests/run_args.py), so this also checks that the image works as hardened
+# as the service, on a volume with Linux file ownership.
 #
 # Usage: tests/qbittorrent/fresh-install.sh [IMAGE]
 #        (default: the qbittorrent service's image in docker-compose.yml;
@@ -45,10 +50,16 @@ key = sys.argv[1]
 print(svc["image"] if key == "image" else svc.get("environment", {}).get(key, ""))' "$1"
 }
 
+docker compose -f "$REPO/docker-compose.yml" config --format json >"$WORK/compose.json"
+HARDENING=()
+while IFS= read -r arg; do
+    HARDENING+=("$arg")
+done < <(python3 -I "$REPO/tests/run_args.py" qbittorrent <"$WORK/compose.json")
 IMAGE=${1:-$(service_value image)}
 PUID=$(service_value PUID)
 PGID=$(service_value PGID)
 echo "image: $IMAGE"
+echo "hardening: ${HARDENING[*]:-none}"
 
 failures=0
 pass() { printf 'ok    %s\n' "$*"; }
@@ -93,7 +104,7 @@ if not isinstance(target, str) or target.rstrip("/") != "/downloads":
 
 WATCH_FILE=/config/qBittorrent/watched_folders.json
 mkdir -p "$WORK/watch" "$WORK/downloads"
-docker run -d --name "$CONTAINER" --network none \
+docker run -d --name "$CONTAINER" --network none ${HARDENING[@]+"${HARDENING[@]}"} \
     -e "PUID=$PUID" -e "PGID=$PGID" -e "WEBUI_PORT=$WEBUI_PORT" \
     --mount type=volume,dst=/config \
     -v "$REPO/config/qbittorrent-init.d:/custom-cont-init.d:ro" \
@@ -167,6 +178,26 @@ if wait_webui >/dev/null; then
     fi
 else
     fail "WebUI did not come back within ${TIMEOUT}s after a restart"
+fi
+
+# s6 (PID 1, root) passes Docker's SIGTERM on to qBittorrent, which runs as
+# PUID: signaling another user's process needs the KILL capability. Without it
+# qBittorrent never hears of the stop, and Docker kills it at the timeout,
+# before it saves its resume data.
+# qBittorrent prints "Exiting cleanly" once per clean exit (the restart above
+# printed one too).
+STOP_TIMEOUT=30
+clean_exits() { docker logs "$CONTAINER" 2>&1 | grep -cxF 'Exiting cleanly' || true; }
+before=$(clean_exits)
+started=$SECONDS
+docker stop -t "$STOP_TIMEOUT" "$CONTAINER" >/dev/null
+took=$((SECONDS - started))
+exit_code=$(docker inspect -f '{{.State.ExitCode}}' "$CONTAINER")
+after=$(clean_exits)
+if [[ "$exit_code" == 0 ]] && ((took < STOP_TIMEOUT && after == before + 1)); then
+    pass "docker stop: qBittorrent exited cleanly in ${took}s"
+else
+    fail "docker stop: exit code $exit_code after ${took}s (timeout ${STOP_TIMEOUT}s), $((after - before)) new 'Exiting cleanly' line(s)"
 fi
 
 if ((failures > 0)); then
