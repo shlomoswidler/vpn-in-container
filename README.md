@@ -24,7 +24,7 @@ A Docker Compose stack providing a privacy-focused, containerized browsing envir
 ┌─────────────────────────────────────────────────────────────┐
 │                    Gluetun VPN Container                     │
 │  WireGuard → ProtonVPN │ Kill Switch │ Port Forwarding      │
-│  Exposed: 5800 (Firefox), 9080 (qBittorrent)                │
+│  Localhost only: 5800 (Firefox), 9080 (qBittorrent)         │
 └─────────────────────────────────────────────────────────────┘
                     │ All traffic routed through VPN
         ┌───────────┼───────────┐
@@ -416,6 +416,8 @@ docker compose down && docker compose up -d
 1. Ensure ports 5800 and 9080 aren't used by other apps
 2. Check VPN container is healthy: `docker compose ps`
 3. Try using `localhost` instead of `127.0.0.1`
+4. Use this computer: the ports are bound to 127.0.0.1, so other devices, and this computer's LAN IP
+   or `.local` name, cannot reach them by design (see [Security Notes](#security-notes))
 
 ## File Structure
 
@@ -471,8 +473,13 @@ vpn-in-container/
 ## Security Notes
 
 - The `.env` file contains your VPN credentials - never commit it
-- Firefox has no password by default (access is local only)
-- qBittorrent WebUI bypasses authentication for private networks (192.168.x.x, 172.16.x.x, 10.x.x.x) and localhost
+- The web UIs are published on 127.0.0.1 only (`docker-compose.yml`), so only this computer can
+  reach them. Other devices on your network cannot, and neither can this computer's own LAN IP or
+  `.local` name. To use them from another device, tunnel over SSH instead of publishing them on
+  the LAN: `ssh -L 5800:localhost:5800 -L 9080:localhost:9080 <this computer>`
+- Firefox has no password (anyone who can reach port 5800 controls the browser)
+- qBittorrent WebUI bypasses authentication for private networks (192.168.x.x, 172.16.x.x, 10.x.x.x) and localhost.
+  Connections through the published port arrive from Docker's bridge gateway, a private address.
 - All traffic is blocked if VPN disconnects (kill switch)
 - DNS queries go through the VPN (DNS-over-TLS)
 - Autoheal has read-only access to the Docker socket for health monitoring
