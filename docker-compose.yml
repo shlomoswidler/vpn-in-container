@@ -12,11 +12,13 @@ services:
       - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
+    # Loopback only: neither web UI has a password. Without a host IP, Docker binds every
+    # interface (IPv4 and IPv6) and OrbStack forwards the ports to the LAN.
     ports:
       # Firefox noVNC Web GUI
-      - "5800:5800"
+      - "127.0.0.1:5800:5800"
       # qBittorrent Web UI
-      - "9080:9080"
+      - "127.0.0.1:9080:9080"
     environment:
       # ProtonVPN with WireGuard
       - VPN_SERVICE_PROVIDER=protonvpn

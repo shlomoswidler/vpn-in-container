@@ -3,6 +3,8 @@
 #
 # Checks real behavior, not just container status:
 #   - every service runs the image docker-compose.yml pins, and is healthy
+#   - the web UIs are published on 127.0.0.1 only: they answer at localhost,
+#     but not at this computer's LAN address or any other address it has
 #   - traffic from all three VPN-routed containers leaves through the VPN
 #     (same public IP, different from the host's), and the kill switch drops
 #     TCP and ICMP forced around the tunnel (while the same probes through the
@@ -243,6 +245,79 @@ if [[ "$(docker inspect -f '{{.State.Running}}' "$AUTOHEAL" 2>/dev/null)" == tru
 else
     fail "$AUTOHEAL is not running"
 fi
+
+echo "== published ports (loopback only)"
+# The web UIs have no password, so only this computer may reach them: every
+# port docker-compose.yml publishes must be bound to 127.0.0.1, and nothing else.
+bindings=$(docker port "$VPN" 2>/dev/null || true)
+bindings_verdict=$(python3 -I -c '
+import json, sys
+config_path, bindings = sys.argv[1:]
+ports = json.load(open(config_path))["services"]["vpn"].get("ports", [])
+wanted = {"%s/%s -> 127.0.0.1:%s" % (p["target"], p.get("protocol", "tcp"), p["published"]) for p in ports}
+actual = {line.strip() for line in bindings.splitlines() if line.strip()}
+if not wanted:
+    print("FAIL docker-compose.yml publishes no ports for the vpn service")
+elif actual != wanted:
+    print("FAIL bindings " + (" | ".join(sorted(actual)) or "none") + "; want " + " | ".join(sorted(wanted)))
+else:
+    print("OK " + ", ".join(sorted(actual)))' "$WORK/config.json" "$bindings" 2>&1 || true)
+if [[ "$bindings_verdict" == OK* ]]; then
+    pass "published ports are bound to 127.0.0.1 only: ${bindings_verdict#OK }"
+else
+    fail "published ports: ${bindings_verdict#FAIL }"
+fi
+# This computer's own addresses other than loopback (IPv4, and IPv6 except
+# link-local): the LAN address first (the source of the route to 1.1.1.1; a UDP
+# connect sends nothing), then every other interface address.
+host_addresses=$(python3 -I -c '
+import ipaddress, re, shutil, socket, subprocess
+found = []
+try:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect(("1.1.1.1", 53))
+        found.append(s.getsockname()[0])
+except OSError:
+    pass
+if shutil.which("ifconfig"):
+    text = subprocess.run(["ifconfig", "-a"], capture_output=True, text=True).stdout
+    candidates = re.findall(r"\binet6? (?:addr:)?([0-9a-fA-F.:]+)", text)
+else:
+    text = subprocess.run(["ip", "-o", "addr", "show"], capture_output=True, text=True).stdout
+    candidates = [c.split("/")[0] for c in re.findall(r"\binet6? (\S+)", text)]
+for candidate in candidates:
+    address = ipaddress.ip_address(candidate)
+    if not (address.is_loopback or address.is_link_local) and candidate not in found:
+        found.append(candidate)
+print(" ".join(found))')
+lan_ip=${host_addresses%% *}
+# Prints curl's exit code and HTTP status for a URL: probe_url URL
+probe_url() {
+    local rc=0 code
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$1" 2>/dev/null) || rc=$?
+    echo "$rc $code"
+}
+for web_ui in "Firefox $FIREFOX_URL/ 5800" "qBittorrent $QBT_URL/api/v2/app/version 9080"; do
+    read -r ui_name ui_url ui_port <<<"$web_ui"
+    local_result=$(probe_url "$ui_url")
+    reached=()
+    for address in $host_addresses; do
+        [[ "$address" == *:* ]] && address="[$address]"
+        result=$(probe_url "${ui_url/localhost:$ui_port/$address:$ui_port}")
+        # curl exit 7: connection refused; 28: timed out. Anything else got an answer.
+        [[ "$result" == "7 000" || "$result" == "28 000" ]] || reached+=("$address ($result)")
+    done
+    if [[ -z "$lan_ip" ]]; then
+        fail "$ui_name: inconclusive, this computer has no LAN address to test from"
+    elif [[ "$local_result" != "0 200" ]]; then
+        fail "$ui_name: inconclusive, $ui_url itself does not answer 200 (curl exit and status: $local_result)"
+    elif ((${#reached[@]} > 0)); then
+        fail "$ui_name port $ui_port answers on this computer's non-loopback address(es): ${reached[*]}"
+    else
+        others=$(($(wc -w <<<"$host_addresses") - 1))
+        pass "$ui_name answers at localhost:$ui_port, not at the LAN address $lan_ip or this computer's $others other non-loopback address(es)"
+    fi
+done
 
 echo "== VPN egress and kill switch"
 host_ip=$(public_ip docker run --rm "$PLAIN_IMAGE" wget -qO- -T 10) || host_ip=""

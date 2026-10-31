@@ -24,6 +24,7 @@ GENERATOR = REPO_ROOT / "config" / "cursors" / "generate_native_theme.py"
 # part after the last colon of the reference, so it contains no slash.
 PINNED_IMAGE = re.compile(r"^[^@\s]+:[\w][\w.-]{0,127}@sha256:[0-9a-f]{64}$")
 DOCKER_SOCKET = "/var/run/docker.sock"
+LOOPBACK = "127.0.0.1"
 AUTOHEAL = "autoheal"
 VPN = "vpn"
 BEHIND_VPN = ("firefox", "qbittorrent", "qsticky")
@@ -99,6 +100,19 @@ class ComposeTests(unittest.TestCase):
     def test_only_the_vpn_publishes_ports(self):
         publishing = {name for name, service in self.services.items() if service.get("ports")}
         self.assertEqual(publishing, {VPN})
+
+    def test_published_ports_are_bound_to_loopback(self):
+        # The web UIs have no password: without a host IP, Docker binds every interface and
+        # OrbStack forwards the ports to the LAN.
+        ports = [
+            (name, port)
+            for name, service in self.services.items()
+            for port in service.get("ports", [])
+        ]
+        self.assertTrue(ports, "no service publishes a port")
+        for name, port in ports:
+            with self.subTest(service=name, port=port.get("published")):
+                self.assertEqual(port.get("host_ip"), LOOPBACK)
 
     def test_the_docker_socket_mount_is_read_only(self):
         mounts = [
