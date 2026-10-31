@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>e2e cookie page</title>
+<script>
+// Says in the title whether the cookie an earlier visit set came back, then sets it
+// (for a day). run.sh loads the page over HTTP from inside the container's network
+// (torrent_server.py), restarts the container on the same /config, and loads it again.
+const kept = document.cookie.split("; ").includes("e2e=kept");
+document.cookie = "e2e=kept; max-age=86400; path=/; SameSite=Lax";
+document.title = "e2e cookie page earlier-cookie=" + (kept ? "yes" : "no");
+</script>
+</head>
+<body></body>
+</html>

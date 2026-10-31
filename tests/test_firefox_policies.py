@@ -27,9 +27,11 @@ class TorrentControlPolicyTests(unittest.TestCase):
         )
 
     def test_torrent_control_runs_in_private_windows(self):
-        # Every window is private here (browser.privatebrowsing.autostart): an extension
-        # without private-browsing access would do nothing. Firefox 136+ grants it from the
-        # policy at every startup, and the user cannot take it away.
+        # With FIREFOX_PRIVATE_BROWSING=true every window is private
+        # (browser.privatebrowsing.autostart): an extension without private-browsing access
+        # would do nothing. Firefox 136+ grants it from the policy at every startup, and the
+        # user cannot take it away. With it off the window is a normal one, where every
+        # extension runs anyway, so the grant changes nothing.
         self.assertIs(self.settings.get(TORRENT_CONTROL, {}).get("private_browsing"), True)
 
 

@@ -25,7 +25,7 @@ URLS = ["http://localhost:5800", "http://localhost:9080"]
 SERVICES = ["vpn", "firefox", "qbittorrent", "qsticky", "autoheal", "autoheal-proxy"]
 HEALTHY = "".join(f"{name}\trunning\thealthy\n" for name in SERVICES)
 # Variables start.sh may set; the tests remove them from the environment they start from.
-MANAGED = ("PUID", "PGID", "DOWNLOADS_PATH")
+MANAGED = ("PUID", "PGID", "DOWNLOADS_PATH", "FIREFOX_PRIVATE_BROWSING")
 
 # Logs each call (and, for `compose up`, what Compose resolves) as one JSON line.
 STUB_DOCKER = """\
@@ -190,6 +190,54 @@ class StartShTests(unittest.TestCase):
                 result = self.run_start(**kwargs)
                 self.assertEqual(result.returncode, 1)
                 self.assertIn(f"PUID from {source} is '{shown}', not a number", result.stderr)
+                self.assertEqual(self.calls(), [], "called docker")
+                self.assertEqual(self.opened(), [])
+
+    def private_browsing_entry(self) -> str:
+        """The firefox service's FF_PREF_PRIVATE_BROWSING as Compose resolves it."""
+        resolved = self.up_call()["resolved"]
+        self.assertIsInstance(resolved, dict, resolved)
+        return resolved["services"]["firefox"]["environment"]["FF_PREF_PRIVATE_BROWSING"]
+
+    def test_private_browsing_values_it_accepts(self):
+        for lines, env, expected in (
+            ((), {}, "false"),
+            (("FIREFOX_PRIVATE_BROWSING=",), {}, "false"),
+            (("FIREFOX_PRIVATE_BROWSING=false",), {}, "false"),
+            (("FIREFOX_PRIVATE_BROWSING=true",), {}, "true"),
+            (('FIREFOX_PRIVATE_BROWSING="true"',), {}, "true"),
+            (("FIREFOX_PRIVATE_BROWSING=true # on",), {}, "true"),
+            (("FIREFOX_PRIVATE_BROWSING=true",), {"FIREFOX_PRIVATE_BROWSING": "false"}, "false"),
+            # Set in the environment, even empty, it wins over .env (in Compose too).
+            (("FIREFOX_PRIVATE_BROWSING=yes",), {"FIREFOX_PRIVATE_BROWSING": ""}, "false"),
+        ):
+            with self.subTest(lines=lines, env=env):
+                self.log.unlink(missing_ok=True)
+                self.write_env("PUID=1234", "PGID=2345", *lines)
+                result = self.run_start(**env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    self.private_browsing_entry(), f"browser.privatebrowsing.autostart={expected}"
+                )
+
+    def test_rejects_a_private_browsing_value_that_is_not_true_or_false(self):
+        for line, env, source, shown in (
+            ("FIREFOX_PRIVATE_BROWSING=yes", {}, ".env", "yes"),
+            ("FIREFOX_PRIVATE_BROWSING=True", {}, ".env", "True"),
+            # Compose reads a comment after "=" and spaces as the value.
+            ("FIREFOX_PRIVATE_BROWSING=   # on", {}, ".env", "# on"),
+            ("FIREFOX_PRIVATE_BROWSING=true", {"FIREFOX_PRIVATE_BROWSING": "1"}, "the environment",
+             "1"),
+        ):  # fmt: skip
+            with self.subTest(line=line, env=env):
+                self.log.unlink(missing_ok=True)
+                self.write_env("PUID=1234", "PGID=2345", line)
+                result = self.run_start(**env)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(
+                    f"FIREFOX_PRIVATE_BROWSING from {source} is '{shown}', not true or false.",
+                    result.stderr,
+                )
                 self.assertEqual(self.calls(), [], "called docker")
                 self.assertEqual(self.opened(), [])
 
