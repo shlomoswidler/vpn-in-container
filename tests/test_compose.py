@@ -47,6 +47,14 @@ BEHIND_VPN = ("firefox", "qbittorrent", "qsticky")
 # replaced by a hardened local build.
 HARDENED = (VPN, *BEHIND_VPN, AUTOHEAL_PROXY)
 NO_NEW_PRIVILEGES = "no-new-privileges:true"
+# The services with a read-only root filesystem, and the tmpfs mounts each needs. Gluetun
+# writes /etc at start (its user, resolv.conf); in read-only mode the qBittorrent image
+# ignores PUID/PGID and runs as 911:1001 (see docker-compose.yml).
+READ_ONLY_TMPFS = {
+    "firefox": {"/tmp", "/run"},
+    "qsticky": {"/app/health"},
+    AUTOHEAL_PROXY: {"/run"},
+}
 # Every hardened service's logging: json-file, rotated at 10 MB, three files kept.
 LOGGING = {"driver": "json-file", "options": {"max-size": "10m", "max-file": "3"}}
 # Each hardened service drops every capability and adds back only these, the set its image
@@ -362,6 +370,16 @@ class ComposeTests(unittest.TestCase):
         self.assertGreaterEqual(
             int(firefox.get("mem_limit", 0)), 3 * int(firefox.get("shm_size", 0))
         )
+
+    def test_read_only_root_filesystems_where_the_image_allows_it(self):
+        for name in HARDENED:
+            with self.subTest(service=name):
+                service = self.services[name]
+                if name in READ_ONLY_TMPFS:
+                    self.assertIs(service.get("read_only"), True)
+                    self.assertEqual(set(service.get("tmpfs", [])), READ_ONLY_TMPFS[name])
+                else:
+                    self.assertFalse(service.get("read_only", False))
 
     def test_hardened_services_rotate_their_logs(self):
         # Explicit, not the daemon's default: a stock Docker Engine keeps json-file logs

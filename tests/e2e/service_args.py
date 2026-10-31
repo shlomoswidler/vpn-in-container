@@ -5,8 +5,8 @@ that reproduce its browser setup: the XCURSOR_*, display and FF_PREF_*
 environment variables, and the read-only mounts under the cursor-related
 directories, the Firefox profile (userChrome.css, customKeys.json) and the
 Firefox install directory (autoconfig). It also carries the service's security
-options, capabilities and limits (tests/run_args.py), so the test runs Firefox
-as hardened as the service.
+options, capabilities, read-only root and limits (tests/run_args.py), so the
+test runs Firefox as hardened as the service.
 """
 
 import importlib.util

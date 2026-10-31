@@ -567,7 +567,12 @@ vpn-in-container/
     container instead of slowing the computer. Each is well above the peak measured: Firefox
     8 GB and 4096 processes and threads (20 busy tabs used 4.3 GB and 1,311), qBittorrent 2 GB,
     Gluetun 512 MB, qSticky 256 MB, the socket proxy 128 MB. A container that runs out restarts
-    (Firefox loses its tabs); raise `mem_limit` in `docker-compose.yml` if you keep many more tabs open.
+    (Firefox loses its tabs); raise `mem_limit` in `docker-compose.yml` if you keep many more
+    tabs open.
+  - Read-only root filesystems for Firefox, qSticky and the socket proxy, with tmpfs mounts where
+    they write (`/tmp` and `/run`; qSticky's `/app/health`). Not for Gluetun, which writes
+    `/etc/passwd` and `/etc/resolv.conf` at start, or qBittorrent, whose image ignores
+    `PUID`/`PGID` when read-only.
 - Only `autoheal-proxy` mounts the Docker socket. The `:ro` on that mount does not limit the
   API (a read-only mount does not stop connecting to a socket, and every API call, writes
   included, goes over that connection); the proxy's allowlist does. Autoheal

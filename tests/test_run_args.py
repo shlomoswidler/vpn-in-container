@@ -53,6 +53,13 @@ class HardeningArgsTests(unittest.TestCase):
             ],
         )  # fmt: skip
 
+    def test_read_only_root_and_tmpfs_mounts(self):
+        service = {"read_only": True, "tmpfs": ["/tmp", "/run"]}
+        self.assertEqual(
+            self.hardening_args(service), ["--read-only", "--tmpfs", "/tmp", "--tmpfs", "/run"]
+        )
+        self.assertEqual(self.hardening_args({"read_only": False}), [])
+
     def test_pid_and_memory_limits(self):
         # As `docker compose config` resolves them: pids_limit a number, mem_limit bytes.
         service = {"pids_limit": 512, "mem_limit": "2147483648"}
