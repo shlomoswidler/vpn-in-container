@@ -401,6 +401,10 @@ tests/browser/run.sh   # the web UI in headless Chrome and Firefox: the patched 
                        # the audio player, and sound through the real web UI of a throwaway
                        # container, also across a restart of it
 tests/stack/recovery.sh        # DISRUPTIVE: restarts the VPN container and times the recovery
+tests/stack/daemon-restart.sh --yes-restart-docker  # VERY DISRUPTIVE: restarts the Docker
+                                                    # engine, so every container on this host:
+                                                    # the stack must come back by itself, and
+                                                    # stay stopped after `docker compose stop`
 tests/qbittorrent/download.sh  # a real multi-file download between two throwaway qBittorrent
                                # containers (no internet), checked by SHA-256 and recheck
 tests/qbittorrent/fresh-install.sh  # the init script on an empty /config (no network): its
