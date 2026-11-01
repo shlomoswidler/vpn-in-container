@@ -35,5 +35,25 @@ class TorrentControlPolicyTests(unittest.TestCase):
         self.assertIs(self.settings.get(TORRENT_CONTROL, {}).get("private_browsing"), True)
 
 
+class MozillaReportingPolicyTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.policies = json.loads(POLICIES.read_text())["policies"]
+
+    def test_telemetry_is_off(self):
+        # Telemetry is sent under a client ID kept in the profile (/config), which would tie
+        # the browser's sessions together.
+        self.assertIs(self.policies.get("DisableTelemetry"), True)
+
+    def test_studies_and_experiments_are_off(self):
+        # Studies (Normandy's and Nimbus's) change Firefox's settings remotely.
+        self.assertIs(self.policies.get("DisableFirefoxStudies"), True)
+
+    def test_rollouts_are_off(self):
+        # Nimbus rollouts change settings remotely too, and DisableFirefoxStudies does not stop
+        # them: Nimbus checks a separate policy feature for rollouts.
+        self.assertIs(self.policies.get("DisableRemoteImprovements"), True)
+
+
 if __name__ == "__main__":
     unittest.main()

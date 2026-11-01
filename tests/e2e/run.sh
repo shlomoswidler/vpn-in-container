@@ -86,10 +86,14 @@
 # stops the container at start, with the reason in its log, before the image
 # writes the value into prefs.js.
 #
+# Scenario 12 checks the service's Firefox policies (policies.json): with them a
+# clean quit archives no telemetry pings in the profile, while without them the
+# same quit archives some.
+#
 # Usage: tests/e2e/run.sh [SCENARIO...]   (needs docker, python3 and node on the host)
 #
 # Without arguments, every scenario runs, in the groups SCENARIO_GROUPS lists
-# (1-4; 5; 6-9 and 11; 10), all groups at the same time: each group is a run of
+# (1-4; 5; 6-9, 11 and 12; 10), all groups at the same time: each group is a run of
 # this script with only its scenarios, so it has its own containers (named after
 # its process id) and its own work directory. This run reads the firefox
 # service's configuration and checks the image's overlaid files once, before
@@ -104,12 +108,12 @@ set -euo pipefail
 E2E_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$E2E_DIR/../.." && pwd)
 SELF="$E2E_DIR/$(basename "$0")"
-ALL_SCENARIOS="1 2 3 4 5 6 7 8 9 10 11"
+ALL_SCENARIOS="1 2 3 4 5 6 7 8 9 10 11 12"
 # The groups a run without arguments starts, balanced by the scenarios' times
 # (measured alone, in seconds: 1 83, 2 16, 3 23, 4 12, 5 122, 6 47 plus its
-# switch to off, 7 11, 8 9, 9 23, 10 215, 11 1.5). Each group must hold every
+# switch to off, 7 11, 8 9, 9 23, 10 215, 11 1.5, 12 74). Each group must hold every
 # scenario another of its scenarios continues from (4 needs 3).
-SCENARIO_GROUPS=("1 2 3 4" "5" "6 7 8 9 11" "10")
+SCENARIO_GROUPS=("1 2 3 4" "5" "6 7 8 9 11 12" "10")
 # The scenarios this run runs, as " N N ... ", in ALL_SCENARIOS order; empty
 # for a run of all the groups.
 SELECTED=""
@@ -163,8 +167,10 @@ cleanup() {
     for pid in ${GROUP_PIDS[@]+"${GROUP_PIDS[@]}"}; do
         wait "$pid" 2>/dev/null || true
     done
-    docker rm -f "$CONTAINER-web" "$CONTAINER-stun" "$CONTAINER-overlays" "$CONTAINER-bad" \
-        "$PROBE_CONTAINER" "$CONTAINER" >/dev/null 2>&1 || true
+    # -v: also the anonymous /config volumes of the containers not started with --rm.
+    docker rm -f -v "$CONTAINER-web" "$CONTAINER-stun" "$CONTAINER-overlays" "$CONTAINER-bad" \
+        "$CONTAINER-policies" "$CONTAINER-nopolicies" "$PROBE_CONTAINER" "$CONTAINER" \
+        >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -255,7 +261,7 @@ if [[ -z "$SETUP_DIR" ]]; then
         mkdir -p "$WORK/image-root$(dirname "$path")"
         docker cp -q "$CONTAINER-overlays:$path" "$WORK/image-root$path"
     done <<<"$OVERLAID"
-    docker rm "$CONTAINER-overlays" >/dev/null
+    docker rm -v "$CONTAINER-overlays" >/dev/null
     python3 -I "$REPO/tests/image_overlays.py" "$WORK/image-root"
 fi
 
@@ -298,7 +304,7 @@ start_firefox() {
     for arg in "${SERVICE_ARGS[@]}"; do
         args+=("${arg/#$NATIVE_CSS_SOURCE:/$theme_dir:}")
     done
-    docker rm -f "$PROBE_CONTAINER" "$CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f -v "$PROBE_CONTAINER" "$CONTAINER" >/dev/null 2>&1 || true
     docker run -d --rm --name "$CONTAINER" --network none "${NO_DNS_ARGS[@]}" \
         --shm-size 1g \
         "${args[@]}" \
@@ -437,7 +443,7 @@ scenario_2() {
 start_firefox_windowed() {
     local page=${1:-blank-page.html} title=${2:-e2e blank page}
     shift $(($# < 2 ? $# : 2))
-    docker rm -f "$PROBE_CONTAINER" "$CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f -v "$PROBE_CONTAINER" "$CONTAINER" >/dev/null 2>&1 || true
     docker run -d --rm --name "$CONTAINER" --network none "${NO_DNS_ARGS[@]}" \
         --shm-size 1g \
         "${FIREFOX_ARGS[@]}" "$@" \
@@ -1218,7 +1224,7 @@ scenario_5() {
 WEB_PORT=8765 # download-page.html links to this port
 start_web_server() {
     local deadline=$((SECONDS + 30))
-    docker rm -f "$CONTAINER-web" >/dev/null 2>&1 || true
+    docker rm -f -v "$CONTAINER-web" >/dev/null 2>&1 || true
     docker run -d --rm --name "$CONTAINER-web" --network "container:$CONTAINER" \
         -v "$E2E_DIR:/e2e:ro" -v "$1:/srv:ro" "$PROBE_IMAGE" \
         python -I /e2e/torrent_server.py "$WEB_PORT" /srv >/dev/null
@@ -1238,7 +1244,7 @@ start_web_server() {
 # name is free again.
 stop_firefox() {
     local deadline=$((SECONDS + 60))
-    docker rm -f "$CONTAINER-web" "$PROBE_CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f -v "$CONTAINER-web" "$PROBE_CONTAINER" >/dev/null 2>&1 || true
     docker stop "$CONTAINER" >/dev/null
     while docker inspect "$CONTAINER" >/dev/null 2>&1; do
         if ((SECONDS >= deadline)); then
@@ -1830,7 +1836,7 @@ scenario_11() {
     echo "== scenario 11: a FIREFOX_PRIVATE_BROWSING other than true or false stops the container"
     BAD_MESSAGE="54-firefox-private-browsing.sh: FIREFOX_PRIVATE_BROWSING is 'yes', not true or false."
     checks=$((checks + 1))
-    docker rm -f "$CONTAINER-bad" >/dev/null 2>&1 || true
+    docker rm -f -v "$CONTAINER-bad" >/dev/null 2>&1 || true
     docker run -d --name "$CONTAINER-bad" --network none "${BAD_ARGS[@]}" "$IMAGE" >/dev/null
     deadline=$((SECONDS + 60))
     while [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER-bad")" == true ]] &&
@@ -1847,7 +1853,55 @@ scenario_11() {
         tail -n 5 <<<"$bad_log"
         failures=$((failures + 1))
     fi
-    docker rm -f "$CONTAINER-bad" >/dev/null
+    docker rm -f -v "$CONTAINER-bad" >/dev/null
+}
+
+scenario_12() {
+    echo "== scenario 12: with the service's Firefox policies, Firefox saves no telemetry"
+    local policies name archived=() ok=1
+    policies=$(python3 -I -c '
+import json, sys
+volumes = json.load(open(sys.argv[1]))["services"]["firefox"].get("volumes", [])
+print(next(v["source"] for v in volumes if v.get("target") == "/etc/firefox/policies/policies.json"))' \
+        "$WORK/compose.json")
+    checks=$((checks + 1))
+    docker rm -f -v "$CONTAINER-policies" "$CONTAINER-nopolicies" >/dev/null 2>&1 || true
+    # Not --rm: their profiles are read once they have stopped.
+    docker run -d --name "$CONTAINER-policies" --network none "${NO_DNS_ARGS[@]}" \
+        "${SERVICE_ARGS[@]}" -v "$policies:/etc/firefox/policies/policies.json:ro" \
+        "$IMAGE" >/dev/null
+    docker run -d --name "$CONTAINER-nopolicies" --network none "${NO_DNS_ARGS[@]}" \
+        "${SERVICE_ARGS[@]}" "$IMAGE" >/dev/null
+    # Firefox writes session-state.json when its telemetry session starts.
+    for name in policies nopolicies; do
+        deadline=$((SECONDS + 90))
+        until docker exec "$CONTAINER-$name" test -e /config/profile/datareporting/session-state.json \
+            2>/dev/null || ((SECONDS >= deadline)); do
+            sleep 1
+        done
+    done
+    # A clean quit archives Firefox's telemetry pings in the profile, unless the
+    # DisableTelemetry policy turned archiving off.
+    docker stop "$CONTAINER-policies" "$CONTAINER-nopolicies" >/dev/null
+    for name in policies nopolicies; do
+        mkdir "$WORK/telemetry-$name"
+        docker cp "$CONTAINER-$name:/config/profile/datareporting" "$WORK/telemetry-$name/" \
+            >/dev/null 2>&1 || true
+        archived+=("$(find "$WORK/telemetry-$name" -path '*/archived/*' -type f | wc -l | tr -d ' ')")
+    done
+    docker rm -f -v "$CONTAINER-policies" "$CONTAINER-nopolicies" >/dev/null
+    # Without the policies, the same quit must archive some: else this check sees nothing.
+    if ((archived[0] != 0 || archived[1] == 0)); then
+        ok=0
+    fi
+    if ((ok)); then
+        printf 'ok    %-22s %s\n' no-telemetry \
+            "0 pings archived with the policies, ${archived[1]} without them"
+    else
+        printf 'FAIL  %-22s %s\n' no-telemetry \
+            "${archived[0]} ping(s) archived with the policies, ${archived[1]} without them (expected 0, and some)"
+        failures=$((failures + 1))
+    fi
 }
 
 # Prints this run's result as its last line: "all N checks passed", or "F of N

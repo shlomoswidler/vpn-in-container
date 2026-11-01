@@ -6,6 +6,9 @@
         "install_url": "https://addons.mozilla.org/firefox/downloads/latest/torrent-control/latest.xpi",
         "private_browsing": true
       }
-    }
+    },
+    "DisableTelemetry": true,
+    "DisableFirefoxStudies": true,
+    "DisableRemoteImprovements": true
   }
 }

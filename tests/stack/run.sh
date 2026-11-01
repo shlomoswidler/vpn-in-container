@@ -88,7 +88,7 @@ fail() {
 }
 
 cleanup() {
-    docker rm -f "$TEST_ID-labeled" "$TEST_ID-unlabeled" "$TEST_ID-proxy-target" \
+    docker rm -f -v "$TEST_ID-labeled" "$TEST_ID-unlabeled" "$TEST_ID-proxy-target" \
         "$TEST_ID-created" >/dev/null 2>&1 || true
     if [[ -n "$watch_file" ]]; then
         rm -f "$watch_file"
@@ -1148,7 +1148,7 @@ if [[ "$result" == 204 &&
 else
     fail "POST /containers/<id>/restart through the proxy: $result (want 204), or the container did not restart"
 fi
-docker rm -f "$TEST_ID-proxy-target" >/dev/null 2>&1 || true
+docker rm -f -v "$TEST_ID-proxy-target" >/dev/null 2>&1 || true
 
 echo "== Autoheal"
 start_period=$(compose_value autoheal env:AUTOHEAL_START_PERIOD)
