@@ -845,10 +845,12 @@ read_indicator() {
 }
 
 # Prints the process id of Firefox's main process (not a content process), or
-# nothing if Firefox is not running.
+# nothing if Firefox is not running. awk reads to the end: stopping at the
+# first match could leave ps writing into a closed pipe (SIGPIPE), which fails
+# the pipeline under pipefail and stops this script.
 firefox_pid() {
     docker exec "$CONTAINER" ps -o pid,args 2>/dev/null |
-        awk '$2 == "/usr/lib/firefox/firefox" && !/-contentproc/ { print $1; exit }'
+        awk '$2 == "/usr/lib/firefox/firefox" && !/-contentproc/ && !found { print $1; found = 1 }'
 }
 
 # Prints what the test container shows, for a failed check LABEL: Firefox's

@@ -174,6 +174,34 @@ class SingleWindowSettingsTests(unittest.TestCase):
             handler.index("win.PanelUI.hide();"),
         )
 
+    def test_firefox_keys_stay_before_devtools_keys(self):
+        # Of two keysets with the same key, the one bound first gets it, and DevTools' keyset
+        # also has Ctrl+Shift+W (its DOM panel). Because customKeys.json is not empty, Firefox
+        # re-binds mainKeyset once it has read the file, which in a process's first window can
+        # come after DevTools added its keyset: Ctrl+Shift+W then did nothing
+        # (docs/agents_output/debugging/ctrl-shift-w-intermittent.md). Every browser window
+        # re-binds DevTools' keyset (inserted before mainKeyset, as DevTools does) now and after
+        # each re-bind of mainKeyset, from the start of the window's delayed startup.
+        self.assertNotEqual(json.loads(CUSTOM_KEYS.read_text()), {})
+        code = re.sub(r"//[^\n]*", "", SINGLE_WINDOW.read_text())
+        body = re.search(r"const keepMainKeysFirst = .*?\n    \};", code, re.DOTALL)
+        self.assertIsNotNone(body)
+        body = body.group(0)
+        self.assertIn('doc.getElementById("mainKeyset")', body)
+        self.assertIn('doc.getElementById("devtoolsKeyset")', body)
+        self.assertIn("main.parentNode.insertBefore(devtools, main);", body)
+        self.assertRegex(
+            body,
+            r"rebindDevTools\(\);\s*new win\.MutationObserver\(\(mutations\) => \{\s*"
+            r"if \(mutations\.some\(\(mutation\) => "
+            r"Array\.from\(mutation\.addedNodes\)\.includes\(main\)\)\) \{\s*rebindDevTools\(\);",
+        )
+        self.assertIn(".observe(main.parentNode, { childList: true });", body)
+        self.assertRegex(
+            code,
+            r"Services\.obs\.addObserver\(\(newWindow\) => \{\s*keepMainKeysFirst\(newWindow\);",
+        )
+
     def test_shutdown_key_is_the_one_the_shutdown_script_presses(self):
         # The container's shutdown script must press the key that quits without asking, or
         # every `docker stop` would open the Quit & Restart dialog and kill Firefox after it.
