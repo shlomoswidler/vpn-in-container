@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs the routine test suites at the same time and reports each one: the unit
-# tests (python3 -m unittest discover -s tests), tests/e2e/run.sh,
+# tests (node --test tests/, then python3 -m unittest discover -s tests),
+# tests/e2e/run.sh,
 # tests/browser/run.sh and tests/stack/run.sh (which checks the running stack:
 # docker compose up -d first). The disruptive tests (tests/stack/recovery.sh,
 # tests/stack/daemon-restart.sh) are not run.
@@ -37,7 +38,7 @@ echo "logs: $LOG_DIR"
 
 run_suite() {
     if [[ "$1" == unit ]]; then
-        cd "$REPO" && python3 -m unittest discover -s tests
+        cd "$REPO" && node --test tests/ && python3 -m unittest discover -s tests
     else
         bash "$TESTS_DIR/$1/run.sh"
     fi
