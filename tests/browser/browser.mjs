@@ -19,6 +19,15 @@
 // (--autoplay-policy=document-user-activation-required), so headless mode cannot differ.
 // Firefox uses its default autoplay policy; it is muted through media.volume_scale, which
 // scales only what reaches the speakers.
+//
+// The browsers may reach only loopback: every other request (updates, component downloads,
+// telemetry) goes to a proxy at CLOSED_PROXY, a port nothing listens on, so it fails on this
+// computer instead of leaving it. Both browsers send loopback addresses past a proxy, and
+// neither falls back to connecting directly when the proxy is unreachable. Firefox needs
+// network.proxy.failover_direct off for that, and network.proxy.allow_bypass off too: its
+// Remote Settings client retries a request that failed through a proxy with the proxy
+// bypassed. Firefox also makes no DNS lookups (network.dns.disabled), which would leave this
+// computer even with every connection proxied; IP addresses and localhost still work.
 
 import { spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
@@ -27,6 +36,21 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 const CONNECT_TIMEOUT_MS = 30000;
 const POLL_MS = 200;
+// The discard port: tests/browser/run.sh gives its --dump-dom Chrome the same proxy.
+export const CLOSED_PROXY = { host: '127.0.0.1', port: 9 };
+const FIREFOX_PREFS = {
+    'media.volume_scale': '0.0',
+    'network.proxy.type': 1,
+    'network.proxy.http': CLOSED_PROXY.host,
+    'network.proxy.http_port': CLOSED_PROXY.port,
+    'network.proxy.ssl': CLOSED_PROXY.host,
+    'network.proxy.ssl_port': CLOSED_PROXY.port,
+    'network.proxy.allow_hijacking_localhost': false,
+    'network.proxy.failover_direct': false,
+    'network.proxy.allow_bypass': false,
+    'network.dns.disabled': true,
+    'network.dns.disablePrefetch': true,
+};
 
 function connectWebSocket(url) {
     return new Promise((resolve, reject) => {
@@ -77,12 +101,18 @@ function commandClient(ws, errorOf) {
     });
 }
 
-async function launchChrome(binary, profile, port) {
-    const browser = spawn(binary, [
+// Chrome's command-line arguments, for PROFILE and the DevTools port PORT.
+export function chromeArgs(profile, port) {
+    return [
         '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
         `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, '--mute-audio',
+        `--proxy-server=${CLOSED_PROXY.host}:${CLOSED_PROXY.port}`,
         '--autoplay-policy=document-user-activation-required', 'about:blank',
-    ], { stdio: 'ignore' });
+    ];
+}
+
+async function launchChrome(binary, profile, port) {
+    const browser = spawn(binary, chromeArgs(profile, port), { stdio: 'ignore' });
     try {
         const wsUrl = await retry(`no DevTools page target on port ${port}`, async () => {
             const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
@@ -152,8 +182,15 @@ async function launchChrome(binary, profile, port) {
     }
 }
 
+// The user.js Firefox's throwaway profile gets: FIREFOX_PREFS.
+export function firefoxUserJs() {
+    return Object.entries(FIREFOX_PREFS)
+        .map(([name, value]) => `user_pref(${JSON.stringify(name)}, ${JSON.stringify(value)});\n`)
+        .join('');
+}
+
 async function launchFirefox(binary, profile, port) {
-    writeFileSync(join(profile, 'user.js'), 'user_pref("media.volume_scale", "0.0");\n');
+    writeFileSync(join(profile, 'user.js'), firefoxUserJs());
     const browser = spawn(binary, [
         '--headless', '--no-remote', '--profile', profile,
         '--remote-debugging-port', String(port), 'about:blank',

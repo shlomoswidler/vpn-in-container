@@ -10,7 +10,9 @@
 # read with --dump-dom in Chrome; everything else is driven by page-result.mjs
 # (browser.mjs: the DevTools Protocol for Chrome, WebDriver BiDi for Firefox).
 # The audio harness runs in real time and needs a real click. Each run uses a
-# throwaway profile.
+# throwaway profile, and the browsers can reach only loopback: everything else
+# goes to a proxy at a closed port (browser.mjs's CLOSED_PROXY), so their own
+# background requests never leave this computer.
 #
 # Then the whole audio path, in each browser: a throwaway container from the
 # image, started as tests/e2e/run.sh starts them (the service's settings and
@@ -267,8 +269,10 @@ browser_checks() {
     failures=0
     if [[ "$kind" == chrome ]]; then
         version=$("$binary" --version | sed 's/ *$//')
+        # The proxy is browser.mjs's CLOSED_PROXY: Chrome reaches only loopback.
         result=$("$binary" --headless=new --disable-gpu --no-first-run \
             --user-data-dir="$WORK/profiles/chrome" --virtual-time-budget=10000 \
+            --proxy-server=127.0.0.1:9 \
             --dump-dom "$URL" 2>/dev/null | sed -n 's:.*<pre id="result">\(.*\)</pre>.*:\1:p')
         report "$version cursor" "$result" "$EXPECTED"
         result=$(node "$BROWSER_DIR/page-result.mjs" chrome "$binary" \

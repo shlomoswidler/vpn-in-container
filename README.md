@@ -485,7 +485,8 @@ tests/e2e/run.sh       # Firefox in throwaway containers: cursors, single window
 tests/browser/run.sh   # the web UI in headless Chrome and Firefox: the patched noVNC cursor,
                        # the audio player, and sound through the real web UI of a throwaway
                        # container, also across a restart of it; Ctrl+` through the web UI
-                       # switching that container's Firefox windows
+                       # switching that container's Firefox windows. The browsers reach only
+                       # loopback: anything else goes to a proxy at a closed port
 tests/stack/recovery.sh        # DISRUPTIVE: restarts the VPN container and times the recovery
 tests/stack/daemon-restart.sh --yes-restart-docker  # VERY DISRUPTIVE: restarts the Docker
                                                     # engine, so every container on this host:
@@ -743,6 +744,7 @@ vpn-in-container/
 │       └── 10-configure-qbittorrent.sh  # Auto-configures qBittorrent settings
 ├── tests/
 │   ├── cursor-keyword.test.mjs        # node --test tests/
+│   ├── browser-launch.test.mjs        # The test browsers' loopback-only proxy settings
 │   ├── test_generate_native_theme.py  # python3 -m unittest discover -s tests
 │   ├── test_make_core_glyph_table.py
 │   ├── image_overlays.py   # Checks each patched file is the image's file plus its patch
