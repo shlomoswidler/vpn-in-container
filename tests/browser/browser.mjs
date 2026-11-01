@@ -7,6 +7,10 @@
 //   evaluate(expression)     the value of a JavaScript expression in the page (JSON-able)
 //   click(x, y)              a trusted left click at (x, y) in CSS pixels: it counts as a
 //                            user gesture (user activation) for the autoplay policy
+//   controlKey(key, code, keyCode)
+//                            presses and releases Control+KEY on the focused element, as
+//                            KEY (KeyboardEvent.key), CODE (.code) and KEYCODE (the
+//                            Windows virtual key code, which CDP needs) on a US keyboard
 //   addPreloadScript(source) runs SOURCE (a function's source text) in every new document
 //                            before the page's own scripts
 //   close()                  ends the session and stops the browser
@@ -123,6 +127,17 @@ async function launchChrome(binary, profile, port) {
                 await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point });
                 await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point });
             },
+            async controlKey(key, code, keyCode) {
+                // CDP's modifier bit for Control is 2.
+                const control = {
+                    key: 'Control', code: 'ControlLeft', windowsVirtualKeyCode: 17, modifiers: 2,
+                };
+                const pressed = { key, code, windowsVirtualKeyCode: keyCode, modifiers: 2 };
+                await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...control });
+                await send('Input.dispatchKeyEvent', { type: 'keyDown', ...pressed });
+                await send('Input.dispatchKeyEvent', { type: 'keyUp', ...pressed });
+                await send('Input.dispatchKeyEvent', { type: 'keyUp', ...control, modifiers: 0 });
+            },
             async addPreloadScript(source) {
                 await send('Page.addScriptToEvaluateOnNewDocument', { source: `(${source})();` });
             },
@@ -176,6 +191,21 @@ async function launchFirefox(binary, profile, port) {
                             { type: 'pointerMove', x: Math.round(x), y: Math.round(y) },
                             { type: 'pointerDown', button: 0 },
                             { type: 'pointerUp', button: 0 },
+                        ],
+                    }],
+                });
+            },
+            async controlKey(key) {
+                // WebDriver's code point for Control is U+E009; the browser derives the code.
+                await send('input.performActions', {
+                    context,
+                    actions: [{
+                        type: 'key', id: 'keyboard',
+                        actions: [
+                            { type: 'keyDown', value: '\uE009' },
+                            { type: 'keyDown', value: key },
+                            { type: 'keyUp', value: key },
+                            { type: 'keyUp', value: '\uE009' },
                         ],
                     }],
                 });

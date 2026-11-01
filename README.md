@@ -167,13 +167,20 @@ docker compose stop
   - Private windows open as in Firefox itself: Ctrl+Shift+P, "New private window" in the app
     menu and the File menu, "Open Link in New Private Window". When a private window is already
     open, a new one's tabs join it.
-  - A private window covers the normal one, and there is no way back to the normal window short
-    of Ctrl+Q: nothing closes a window (see the next item), closing the private window's last
-    tab opens a new tab, its flame button ("Clear private session") keeps the window, and
-    Openbox has no keyboard shortcuts or title bar for Firefox's windows. Ctrl+Q restarts the
-    container with one normal window.
-  - Ctrl+N, Ctrl+Shift+N and Ctrl+Shift+W do nothing, and the menu items that open a normal
-    window or close a window are hidden.
+  - **Switching windows:** a window covers the other (both are full size). Press **Ctrl+`**
+    (Control and the key left of 1; on a Mac too, Control, not Command) to show the other
+    window, or use the **Window** menu in the menu bar and choose a window (they are numbered:
+    Alt+W, then 1 or 2). The menu bar shows while Alt is held, or always after right-clicking the
+    tab strip and choosing Menu Bar. Firefox has no Window menu of its own on Linux;
+    `config/firefox-autoconfig/single-window.cfg` adds it. Right after a window opens, give it a
+    second: a switch within a fraction of a second of it showing can be lost. (Ctrl+` is tested
+    through the web UI in headless Chrome and Firefox; the Alt keys were tested inside the
+    container, not from a Mac keyboard, where Option may not arrive as Alt.)
+  - **Closing a window:** Ctrl+Shift+W, File > Close Window or Window > Close Window close the
+    window shown while another one is open, for example the private window, which takes you
+    back to the normal one. On the last window they are greyed out and do nothing: closing it
+    would stop the container.
+  - Ctrl+N and Ctrl+Shift+N do nothing, and the menu items that open a normal window are hidden.
   - Closing the last tab opens a new tab; the window stays.
   - Ctrl+Q still quits Firefox (the image's shutdown script relies on it); the
     container then stops and restarts.
@@ -459,7 +466,8 @@ tests/e2e/run.sh       # Firefox in throwaway containers: cursors, single window
                        # audio stream
 tests/browser/run.sh   # the web UI in headless Chrome and Firefox: the patched noVNC cursor,
                        # the audio player, and sound through the real web UI of a throwaway
-                       # container, also across a restart of it
+                       # container, also across a restart of it; Ctrl+` through the web UI
+                       # switching that container's Firefox windows
 tests/stack/recovery.sh        # DISRUPTIVE: restarts the VPN container and times the recovery
 tests/stack/daemon-restart.sh --yes-restart-docker  # VERY DISRUPTIVE: restarts the Docker
                                                     # engine, so every container on this host:
@@ -691,11 +699,11 @@ vpn-in-container/
 │   ├── firefox-autoconfig/
 │   │   ├── autoconfig.js   # Loads single-window.cfg (Firefox autoconfig)
 │   │   └── single-window.cfg  # Moves a new window's tabs into the open window of its kind
-│   │                          # (normal or private)
+│   │                          # (normal or private); Window menu, Ctrl+`, Close Window
 │   ├── firefox-chrome/
 │   │   └── userChrome.css  # No toolbar window dragging; hides new/close window menu items
 │   ├── firefox-profile/
-│   │   └── customKeys.json # Clears the new-normal-window and close-window shortcuts
+│   │   └── customKeys.json # Clears the new-normal-window and reopen-window shortcuts
 │   ├── firefox-init.d/
 │   │   ├── 54-firefox-private-browsing.sh  # Refuses a FIREFOX_PRIVATE_BROWSING but true/false
 │   │   ├── 57-openbox-no-keepborder.sh  # Removes the 1px top border (unthemed cursor strip)
@@ -720,7 +728,7 @@ vpn-in-container/
 │   ├── stack/run.sh        # Running stack: VPN, kill switch, ports, qBittorrent, Autoheal
 │   ├── qbittorrent/download.sh  # Isolated real download test for the qBittorrent image
 │   ├── qbittorrent/fresh-install.sh  # The init script on an empty /config (watch folder)
-│   └── browser/run.sh      # Patched noVNC and the audio player in headless Chrome and Firefox
+│   └── browser/run.sh      # Patched noVNC, the audio player and Ctrl+` in headless Chrome and Firefox
 
 ~/Downloads/vpn-in-container/           # Host downloads directory (DOWNLOADS_PATH in .env)
 ├── downloads/              # Firefox downloads + .torrent file handoff

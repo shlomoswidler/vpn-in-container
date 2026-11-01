@@ -219,11 +219,13 @@ services:
       # Removes Openbox's Alt+drag move/resize bindings (1-bit cursors; Alt+Right unmaximizes)
       - ./config/firefox-init.d/58-openbox-no-alt-drag.sh:/etc/cont-init.d/58-openbox-no-alt-drag.sh:ro
       # One window of each kind: moves a new browser window's tabs into the open window of the
-      # same kind (normal or private)
+      # same kind (normal or private); adds the Window menu and Ctrl+` to switch windows, and
+      # disables Close Window on the last window
       - ./config/firefox-autoconfig/autoconfig.js:/usr/lib/firefox/defaults/pref/autoconfig.js:ro
       - ./config/firefox-autoconfig/single-window.cfg:/usr/lib/firefox/single-window.cfg:ro
-      # One window of each kind: clears Ctrl+N, Ctrl+Shift+N and Ctrl+Shift+W (Ctrl+Shift+P, a
-      # private window, stays; Ctrl+Q stays too: the image's shutdown script sends it)
+      # One window of each kind: clears Ctrl+N and Ctrl+Shift+N (reopen a closed window).
+      # Ctrl+Shift+P (a private window) and Ctrl+Shift+W (close the window, disabled on the
+      # last one) stay; Ctrl+Q stays too: the image's shutdown script sends it
       - ./config/firefox-profile/customKeys.json:/config/profile/customKeys.json:ro
     shm_size: "2gb"
     # Read-only root filesystem, as the image supports: it writes at run time only to /config

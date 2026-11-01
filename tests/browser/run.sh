@@ -21,6 +21,13 @@
 # reconnects to) does to sound that was on, and to sound that was muted (see
 # that file).
 #
+# Last, switching windows from the web UI, in each browser: a throwaway container
+# as above but with private-only browsing off (FIREFOX_PRIVATE_BROWSING=false,
+# whatever .env sets) and showing tests/e2e/blank-page.html, so it can have a
+# normal and a private window; web-ui-windows.mjs opens a private window in it
+# and checks that Ctrl+` typed in the web UI shows the other window (see that
+# file).
+#
 # Usage: tests/browser/run.sh   (needs docker, python3, node, and Google
 #        Chrome and/or Firefox in /Applications)
 
@@ -33,7 +40,7 @@ FIREFOX="/Applications/Firefox.app/Contents/MacOS/firefox"
 WORK=$(mktemp -d)
 SERVER_PID=""
 CONTAINER=""
-WEB_CONTAINER="web-ui-audio-$$"
+WEB_CONTAINER="web-ui-$$"
 TUNNEL_PID=""
 
 stop_web_ui() {
@@ -57,6 +64,14 @@ SERVICE_ARGS=()
 while IFS= read -r arg; do
     SERVICE_ARGS+=("$arg")
 done < <(tail -n +2 "$WORK/service-args")
+# The same with private-only browsing off (the shell's value wins over .env's).
+FIREFOX_PRIVATE_BROWSING=false docker compose -f "$REPO/docker-compose.yml" config \
+    --format json >"$WORK/compose-off.json"
+python3 -I "$REPO/tests/e2e/service_args.py" <"$WORK/compose-off.json" >"$WORK/service-args-off"
+OFF_ARGS=()
+while IFS= read -r arg; do
+    OFF_ARGS+=("$arg")
+done < <(tail -n +2 "$WORK/service-args-off")
 echo "noVNC from: $IMAGE"
 
 mkdir -p "$WORK/site/core/util" "$WORK/profiles"
@@ -134,8 +149,9 @@ done
 failures=0
 browsers=0
 
-# web-ui-audio.mjs's cases.
+# web-ui-audio.mjs's and web-ui-windows.mjs's cases.
 WEB_UI_CASES=19
+WINDOWS_CASES=3
 
 # report LABEL RESULT COUNT: prints ok or FAIL for a harness RESULT of COUNT cases.
 report() {
@@ -149,28 +165,31 @@ report() {
 
 in_x() { docker exec -u 1000 -e DISPLAY=:0 "$WEB_CONTAINER" "$@"; }
 
-# Starts the container on audio-page.html and the tunnel to its web UI; sets
-# WEB_UI_URL. Returns 1 (and prints why) if either does not come up.
+# start_web_ui PAGE TITLE ARGS...: starts the container with the `docker run`
+# ARGS on tests/e2e/PAGE, waits for Firefox to show it (a window title with
+# TITLE), and starts the tunnel to its web UI; sets WEB_UI_URL. Returns 1 (and
+# prints why) if either does not come up.
 start_web_ui() {
-    local window="" port=""
+    local page=$1 title=$2 window="" port=""
+    shift 2
     stop_web_ui
     docker run -d --rm --name "$WEB_CONTAINER" --network none --shm-size 1g \
-        "${SERVICE_ARGS[@]}" \
-        -e FF_OPEN_URL=file:///e2e/audio-page.html \
+        "$@" \
+        -e "FF_OPEN_URL=file:///e2e/$page" \
         -e FF_PREF_NO_DATA_BAR=datareporting.policy.dataSubmissionPolicyBypassNotification=true \
         -v "$REPO/tests/e2e:/e2e:ro" \
         "$IMAGE" >/dev/null
     for _ in $(seq 1 90); do
         window=$(in_x xdotool search --classname Navigator 2>/dev/null | head -n 1) || true
         if [[ -n "$window" ]] &&
-            [[ "$(in_x xdotool getwindowname "$window" 2>/dev/null)" == *"e2e audio page"* ]]; then
+            [[ "$(in_x xdotool getwindowname "$window" 2>/dev/null)" == *"$title"* ]]; then
             break
         fi
         window=""
         sleep 1
     done
     if [[ -z "$window" ]]; then
-        echo "Firefox never showed audio-page.html"
+        echo "Firefox never showed $page"
         return 1
     fi
     python3 -I "$BROWSER_DIR/tunnel.py" 0 docker exec -i "$WEB_CONTAINER" nc -N 127.0.0.1 5800 \
@@ -192,7 +211,7 @@ start_web_ui() {
 web_ui_audio() {
     local result
     # Not in $(...): the tunnel and WEB_UI_URL must outlive the call.
-    if ! start_web_ui >"$WORK/start.out"; then
+    if ! start_web_ui audio-page.html "e2e audio page" "${SERVICE_ARGS[@]}" >"$WORK/start.out"; then
         report "$3 web UI" "$(cat "$WORK/start.out")" "$WEB_UI_CASES"
         stop_web_ui
         return
@@ -200,6 +219,20 @@ web_ui_audio() {
     result=$(node "$BROWSER_DIR/web-ui-audio.mjs" "$1" "$2" "$WORK/profiles/$1-web-ui" \
         "$(free_port)" "$WEB_UI_URL" "$WEB_CONTAINER") || true
     report "$3 web UI" "$result" "$WEB_UI_CASES"
+    stop_web_ui
+}
+
+# web_ui_windows KIND BINARY LABEL: switching windows from the web UI in browser KIND.
+web_ui_windows() {
+    local result
+    if ! start_web_ui blank-page.html "e2e blank page" "${OFF_ARGS[@]}" >"$WORK/start.out"; then
+        report "$3 windows" "$(cat "$WORK/start.out")" "$WINDOWS_CASES"
+        stop_web_ui
+        return
+    fi
+    result=$(node "$BROWSER_DIR/web-ui-windows.mjs" "$1" "$2" "$WORK/profiles/$1-windows" \
+        "$(free_port)" "$WEB_UI_URL" "$WEB_CONTAINER") || true
+    report "$3 windows" "$result" "$WINDOWS_CASES"
     stop_web_ui
 }
 
@@ -220,12 +253,14 @@ if [[ -x "$CHROME" ]]; then
         "$(free_port)" "$AUDIO_URL" "$AUDIO_CLICK_TITLE") || true
     report "$version audio" "$result" "$AUDIO_CASES"
     web_ui_audio chrome "$CHROME" "$version"
+    web_ui_windows chrome "$CHROME" "$version"
 fi
 
 if [[ -x "$FIREFOX" ]]; then
     browsers=$((browsers + 1))
     version=$("$FIREFOX" --version)
-    mkdir -p "$WORK/profiles/firefox" "$WORK/profiles/firefox-audio" "$WORK/profiles/firefox-web-ui"
+    mkdir -p "$WORK/profiles/firefox" "$WORK/profiles/firefox-audio" "$WORK/profiles/firefox-web-ui" \
+        "$WORK/profiles/firefox-windows"
     result=$(node "$BROWSER_DIR/page-result.mjs" firefox "$FIREFOX" "$WORK/profiles/firefox" \
         "$(free_port)" "$URL") || true
     report "$version cursor" "$result" "$EXPECTED"
@@ -233,6 +268,7 @@ if [[ -x "$FIREFOX" ]]; then
         "$WORK/profiles/firefox-audio" "$(free_port)" "$AUDIO_URL" "$AUDIO_CLICK_TITLE") || true
     report "$version audio" "$result" "$AUDIO_CASES"
     web_ui_audio firefox "$FIREFOX" "$version"
+    web_ui_windows firefox "$FIREFOX" "$version"
 fi
 
 if ((browsers == 0)); then

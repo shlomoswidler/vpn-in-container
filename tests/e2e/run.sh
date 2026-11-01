@@ -25,7 +25,9 @@
 # Scenario 5 checks that Firefox stays one maximized window: tab drags out of the
 # strip, new-window shortcuts, Ctrl+Shift+P, a Shift+clicked link, pop-ups
 # (window.open() with and without a size, a target="_blank" link), another
-# private window and window-closing shortcuts (config/firefox-autoconfig/,
+# private window, the Window menu (one window listed), Ctrl+` and Close Window
+# (Ctrl+Shift+W, the File and Window menus), which do nothing on the last
+# window (config/firefox-autoconfig/,
 # config/firefox-profile/customKeys.json and the single-window FF_PREF_*
 # entries). After each, it checks the window's tabs (single-window-page.html
 # titles each page uniquely).
@@ -62,8 +64,10 @@
 # windows open as in Firefox itself (Ctrl+Shift+P, the File menu, "Open Link in
 # New Private Window") and really are private, Firefox keeps at most one normal
 # and one private window, both maximized, with each new window's or pop-up's tab
-# in the window of its kind, and a .torrent link still downloads into
-# /config/downloads.
+# in the window of its kind, Ctrl+` and the Window menu switch between the two
+# (the shown window is X's active window and the top of Openbox's stack), Close
+# Window (Ctrl+Shift+W, the Window menu) closes the private window but not the
+# last one, and a .torrent link still downloads into /config/downloads.
 #
 # Scenario 11 checks that a FIREFOX_PRIVATE_BROWSING other than true or false
 # stops the container at start, with the reason in its log, before the image
@@ -671,6 +675,116 @@ check_windows() {
     fi
 }
 
+# Prints the id of the window at the top of Openbox's stacking order.
+stack_top() {
+    local stacking
+    stacking=$(in_x obxprop --root _NET_CLIENT_LIST_STACKING 2>/dev/null) || return 1
+    stacking=${stacking##*= }
+    printf '%s\n' "${stacking##*, }"
+}
+
+# Succeeds if a menu is open: a visible popup-menu window (Firefox opens each
+# menu as one).
+menu_open() {
+    local window properties
+    for window in $(in_x xdotool search --onlyvisible --name . 2>/dev/null || true); do
+        properties=$(in_x obxprop --id "$window" 2>/dev/null) || continue
+        if grep -q '_NET_WM_WINDOW_TYPE_POPUP_MENU' <<<"$properties"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# check_shown LABEL WIN ACTION...: runs ACTION, then checks that window WIN is
+# shown: X's active window and the top of Openbox's stack (within 10 s), that
+# Firefox still has exactly WINDOW and PWINDOW, both maximized, and that the
+# container still runs.
+check_shown() {
+    local label=$1 want=$2 problem="" active="" top="" windows deadline window
+    shift 2
+    checks=$((checks + 1))
+    if ! "$@"; then
+        problem="the action failed: $*"
+    else
+        deadline=$((SECONDS + 10))
+        while :; do
+            active=$(in_x xdotool getactivewindow 2>/dev/null) || active=""
+            top=$(stack_top) || top=""
+            if [[ "$active" == "$want" && "$top" == "$want" ]] || ((SECONDS >= deadline)); then
+                break
+            fi
+            sleep 0.2
+        done
+        windows=$(sorted_ids "$(browser_windows || true)")
+        if [[ "$active" != "$want" || "$top" != "$want" ]]; then
+            problem="active window $active, top $top (want $want)"
+        elif [[ "$windows" != "$(sorted_ids "$WINDOW $PWINDOW")" ]]; then
+            problem="windows: $windows (want $WINDOW $PWINDOW)"
+        elif [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" != true ]]; then
+            problem="the container stopped (Firefox exited)"
+        else
+            for window in $windows; do
+                problem+=$(window_size_problem "$window")
+            done
+        fi
+    fi
+    if [[ -z "$problem" ]]; then
+        printf 'ok    %-22s shown: %s\n' "$label" "$want"
+    else
+        printf 'FAIL  %-22s %s\n' "$label" "$problem"
+        failures=$((failures + 1))
+    fi
+}
+
+# check_window_menu LABEL COUNT: the Window menu (Alt+W) of the active window
+# lists COUNT windows, numbered from 1 (access keys 1, 2, ...): it opens, has
+# no item COUNT+1 (the key leaves the menu open), and item 1, the oldest
+# window, WINDOW, shows that window.
+check_window_menu() {
+    local label=$1 count=$2 problem=""
+    checks=$((checks + 1))
+    in_x xdotool key alt+w sleep 1
+    if ! menu_open; then
+        problem="Alt+W opened no menu"
+        # Alt+W may have left the menu bar active, which would take the next keys.
+        in_x xdotool key Escape sleep 0.5 key Escape
+    else
+        in_x xdotool key "$((count + 1))" sleep 1
+        if ! menu_open; then
+            problem="the menu has an item $((count + 1))"
+        else
+            in_x xdotool key Escape sleep 0.5 key Escape sleep 0.5
+            in_x xdotool key alt+w sleep 1 key 1 sleep 1
+            if menu_open; then
+                problem="the menu has no item 1"
+                in_x xdotool key Escape sleep 0.5 key Escape
+            elif [[ "$(in_x xdotool getactivewindow 2>/dev/null || true)" != "$WINDOW" ]]; then
+                problem="item 1 did not show the first window"
+            fi
+        fi
+    fi
+    if [[ -z "$problem" ]]; then
+        printf 'ok    %-22s %s window(s) listed\n' "$label" "$count"
+    else
+        printf 'FAIL  %-22s %s\n' "$label" "$problem"
+        failures=$((failures + 1))
+    fi
+}
+
+# close_window WIN XDOTOOL_ARGS...: shows window WIN, runs xdotool with
+# XDOTOOL_ARGS (a way to close it), and waits up to 10 s for WIN to be gone.
+close_window() {
+    local window=$1 deadline=$((SECONDS + 10))
+    shift
+    in_x xdotool windowactivate --sync "$window" || return 1
+    in_x xdotool "$@" || return 1
+    while [[ " $(browser_windows || true) " == *" $window "* ]]; do
+        ((SECONDS < deadline)) || return 1
+        sleep 0.2
+    done
+}
+
 # check_single_window LABEL TABS SHOWS ACTION...: check_windows with no
 # private window: Firefox has exactly one browser window, WINDOW.
 check_single_window() {
@@ -768,11 +882,21 @@ check_single_window target-blank "shift-click main popup popup-plain blank" blan
 # Another private window (here every window is private): its tab moves in too.
 check_single_window private-window "shift-click main popup popup-plain blank private" private \
     open_private_window private
+sw_tabs="shift-click main popup popup-plain blank private"
+# The Window menu lists the one window, and Ctrl+` has no other window to show.
+check_window_menu window-menu-one 1
+check_single_window ctrl-grave "$sw_tabs" - in_x xdotool key ctrl+grave
 # These come last: a failure here closes Firefox and stops the container.
+# Close Window is disabled on the last window: Ctrl+Shift+W, File > Close Window
+# (access key D) and Window > Close Window (C) do nothing; Escape closes a menu
+# a disabled item leaves open.
+check_single_window ctrl-shift-w "$sw_tabs" - in_x xdotool key ctrl+shift+w
+check_single_window file-close-window "$sw_tabs" - \
+    in_x xdotool key alt+f sleep 1 key d sleep 1 key Escape sleep 0.5 key Escape
+check_single_window window-close-window "$sw_tabs" - \
+    in_x xdotool key alt+w sleep 1 key c sleep 1 key Escape sleep 0.5 key Escape
 # Closing the last tab must leave the window open with a new tab: that is
 # browser.tabs.closeWindowWithLastTab=false (FF_PREF_KEEP_WINDOW_WITH_LAST_TAB).
-check_single_window ctrl-shift-w "shift-click main popup popup-plain blank private" - \
-    in_x xdotool key ctrl+shift+w
 check_single_window ctrl-w-every-tab untitled untitled \
     close_tabs blank popup-plain popup main shift-click untitled
 
@@ -1274,6 +1398,25 @@ check_windows off-private-shift-click "$normal_tabs" \
     "$private_tabs popup popup-plain blank shift-click" private shift-click \
     in_window "$PWINDOW" \
     in_x xdotool mousemove "$((DISPLAY_W / 2))" "$link_y" keydown shift click 1 keyup shift
+# Switching: WINDOW is shown (check_windows shows it last). Ctrl+` shows the next
+# window, the Window menu (Alt+W) the one chosen by number.
+check_shown off-ctrl-grave-private "$PWINDOW" in_x xdotool key ctrl+grave
+check_shown off-ctrl-grave-normal "$WINDOW" in_x xdotool key ctrl+grave
+check_shown off-window-menu-2 "$PWINDOW" in_x xdotool key alt+w sleep 1 key 2
+check_shown off-window-menu-1 "$WINDOW" in_x xdotool key alt+w sleep 1 key 1
+check_window_menu off-window-menu-two 2
+# Closing: the private window closes; the normal one, with its tabs, stays.
+check_windows off-ctrl-shift-w-private "$normal_tabs" - normal - \
+    close_window "$PWINDOW" key ctrl+shift+w
+PWINDOW=""
+check_single_window off-ctrl-shift-w-last "$normal_tabs" - in_x xdotool key ctrl+shift+w
+check_windows off-reopen-private "$normal_tabs" untitled private untitled \
+    in_x xdotool key ctrl+shift+p
+check_windows off-window-menu-close "$normal_tabs" - normal - \
+    close_window "$PWINDOW" key alt+w sleep 1 key c
+PWINDOW=""
+check_single_window off-window-menu-close-last "$normal_tabs" - \
+    in_x xdotool key alt+w sleep 1 key c sleep 1 key Escape sleep 0.5 key Escape
 load_url file:///e2e/download-page.html "e2e download page" >/dev/null || true
 start_web_server "$WORK/web"
 check_torrent_download off-torrent-download "$WORK/downloads-off"
