@@ -28,7 +28,7 @@ PEER_PORT=6881
 TIMEOUT=240
 
 cleanup() {
-    docker rm -f "$SEEDER" "$LEECHER" >/dev/null 2>&1 || true
+    docker rm -f -v "$SEEDER" "$LEECHER" >/dev/null 2>&1 || true
     docker network rm "$NET" >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }

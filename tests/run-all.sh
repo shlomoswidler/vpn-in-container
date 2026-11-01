@@ -2,24 +2,28 @@
 # Runs the routine test suites at the same time and reports each one: the unit
 # tests (node --test tests/, then python3 -m unittest discover -s tests),
 # tests/e2e/run.sh,
-# tests/browser/run.sh and tests/stack/run.sh (which checks the running stack:
-# docker compose up -d first). The disruptive tests (tests/stack/recovery.sh,
-# tests/stack/daemon-restart.sh) are not run.
+# tests/browser/run.sh, tests/stack/run.sh (which checks the running stack:
+# docker compose up -d first), and the qBittorrent image's tests
+# (qbt-download: tests/qbittorrent/download.sh, qbt-fresh-install:
+# tests/qbittorrent/fresh-install.sh). The disruptive tests
+# (tests/stack/recovery.sh, tests/stack/daemon-restart.sh) are not run.
 #
 # The suites share nothing: each names its containers after its own process
-# id, the e2e and browser containers have no network, and the browser suite
-# picks a free port. Each suite's output goes to SUITE.log in LOG_DIR (a new
-# temporary directory unless set); when a suite ends, its result and time are
-# printed, with its failure lines if it failed.
+# id, the e2e, browser and qBittorrent containers have no network (the
+# download test's two have an internal one), and the browser suite picks a free
+# port. Each suite's output goes to SUITE.log in LOG_DIR (a new temporary
+# directory unless set); when a suite ends, its result and time are printed,
+# with its failure lines if it failed.
 #
-# Usage: tests/run-all.sh [SUITE...]   (unit, e2e, browser, stack; default: all)
+# Usage: tests/run-all.sh [SUITE...]
+#        (unit, e2e, browser, stack, qbt-download, qbt-fresh-install; default: all)
 # Exit status: 0 if every suite passed, 1 if any failed, 2 for a usage error.
 
 set -euo pipefail
 
 TESTS_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$TESTS_DIR/.." && pwd)
-ALL_SUITES=(unit e2e browser stack)
+ALL_SUITES=(unit e2e browser stack qbt-download qbt-fresh-install)
 
 suites=("$@")
 if ((${#suites[@]} == 0)); then
@@ -37,11 +41,11 @@ mkdir -p "$LOG_DIR"
 echo "logs: $LOG_DIR"
 
 run_suite() {
-    if [[ "$1" == unit ]]; then
-        cd "$REPO" && node --test tests/ && python3 -m unittest discover -s tests
-    else
-        bash "$TESTS_DIR/$1/run.sh"
-    fi
+    case "$1" in
+        unit) cd "$REPO" && node --test tests/ && python3 -m unittest discover -s tests ;;
+        qbt-*) bash "$TESTS_DIR/qbittorrent/${1#qbt-}.sh" ;;
+        *) bash "$TESTS_DIR/$1/run.sh" ;;
+    esac
 }
 
 # Indexed arrays, one entry per suite (macOS's bash 3.2 has no associative ones).
@@ -64,9 +68,9 @@ while ((remaining > 0)); do
         status=0
         wait "${pids[$i]}" || status=$?
         if ((status == 0)); then
-            printf 'ok    %-8s %4d s\n' "${suites[$i]}" "$((SECONDS - start))"
+            printf 'ok    %-17s %4d s\n' "${suites[$i]}" "$((SECONDS - start))"
         else
-            printf 'FAIL  %-8s %4d s  exit %d, log: %s\n' "${suites[$i]}" "$((SECONDS - start))" \
+            printf 'FAIL  %-17s %4d s  exit %d, log: %s\n' "${suites[$i]}" "$((SECONDS - start))" \
                 "$status" "$LOG_DIR/${suites[$i]}.log"
             grep -E '^(FAIL|ERROR)' "$LOG_DIR/${suites[$i]}.log" | sed 's/^/      /' || true
             failed=$((failed + 1))

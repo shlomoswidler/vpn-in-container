@@ -57,7 +57,7 @@ NO_DNS_ARGS=(--dns 127.0.0.1 --dns-opt timeout:1 --dns-opt attempts:1)
 stop_web_ui() {
     [[ -n "$TUNNEL_PID" ]] && kill "$TUNNEL_PID" 2>/dev/null || true
     TUNNEL_PID=""
-    [[ -z "$WEB_CONTAINER" ]] || docker rm -f "$WEB_CONTAINER" >/dev/null 2>&1 || true
+    [[ -z "$WEB_CONTAINER" ]] || docker rm -f -v "$WEB_CONTAINER" >/dev/null 2>&1 || true
 }
 
 cleanup() {
@@ -66,8 +66,8 @@ cleanup() {
         kill "$pid" 2>/dev/null || true
     done
     [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true
-    [[ -n "$CONTAINER" ]] && docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    docker rm -f "web-ui-$$-chrome" "web-ui-$$-firefox" >/dev/null 2>&1 || true
+    [[ -n "$CONTAINER" ]] && docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f -v "web-ui-$$-chrome" "web-ui-$$-firefox" >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT

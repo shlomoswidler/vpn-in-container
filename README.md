@@ -472,15 +472,17 @@ fetches an unpinned BuildKit frontend and builds on Alpine 3.18.
 ### Automated Tests
 
 ```bash
-tests/run-all.sh       # the unit tests and the stack, e2e and browser suites below, all at
-                       # the same time (about 3 minutes); each suite's log in one directory;
+tests/run-all.sh       # the unit tests and the stack, e2e, browser and qBittorrent suites
+                       # below (not the disruptive ones), all at the same time (about 3
+                       # minutes); each suite's log in one directory;
                        # `tests/run-all.sh e2e browser` runs only those
 tests/stack/run.sh     # the running stack: VPN egress and kill switch, DNS, port forwarding,
                        # qSticky, qBittorrent (API, settings, watch folder), Firefox, Autoheal
                        # and its Docker socket proxy, loopback-only web UI ports
 tests/e2e/run.sh       # Firefox in throwaway containers: cursors, single window, private browsing
                        # on and off (and switching), downloads, WebRTC, sound to the web UI's
-                       # audio stream; its scenarios run in groups at the same time, and
+                       # audio stream, no telemetry with the service's policies; its
+                       # scenarios run in groups at the same time, and
                        # `tests/e2e/run.sh 7 8` runs only scenarios 7 and 8
 tests/browser/run.sh   # the web UI in headless Chrome and Firefox: the patched noVNC cursor,
                        # the audio player, and sound through the real web UI of a throwaway
@@ -731,7 +733,8 @@ vpn-in-container/
 │   │   ├── 57-openbox-no-keepborder.sh  # Removes the 1px top border (unthemed cursor strip)
 │   │   └── 58-openbox-no-alt-drag.sh    # Removes Openbox's Alt+drag move/resize bindings
 │   ├── firefox-policies/
-│   │   └── policies.json   # Installs Torrent Control, allowed in private windows
+│   │   └── policies.json   # Installs Torrent Control, allowed in private windows; no telemetry,
+│   │                       # studies or rollouts
 │   ├── novnc/
 │   │   ├── cursor.js       # Patched noVNC cursor: shows native cursors
 │   │   ├── ui.js           # Patched web UI: sound comes back after a reconnect
@@ -768,6 +771,9 @@ vpn-in-container/
   `.local` name. To use them from another device, tunnel over SSH instead of publishing them on
   the LAN: `ssh -L 5800:localhost:5800 -L 9080:localhost:9080 <this computer>`
 - Firefox has no password (anyone who can reach port 5800 controls the browser)
+- Firefox sends Mozilla no telemetry and runs no studies or rollouts (remote changes to its
+  settings): `config/firefox-policies/policies.json` sets the DisableTelemetry,
+  DisableFirefoxStudies and DisableRemoteImprovements policies
 - qBittorrent WebUI bypasses authentication for private networks (192.168.x.x, 172.16.x.x, 10.x.x.x) and localhost.
   Connections through the published port arrive from Docker's bridge gateway, a private address.
 - qBittorrent's own password is never set by this stack. Since 4.6.1 it has no default: until you
