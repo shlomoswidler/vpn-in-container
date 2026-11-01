@@ -158,6 +158,12 @@ function isSilent(measured) {
 }
 
 // Polls the tap until TEST(measurement) holds, for up to TIMEOUT_MS; the last measurement.
+// How long a muted case waits to see that sound stays off: three times what the matching
+// reconnect case took to see it come on, at least 5 s, at most the 15 s that case had.
+function negativeWaitMs(positiveMs) {
+    return Math.min(15000, Math.max(5000, 3 * positiveMs));
+}
+
 async function measureUntil(session, test, timeoutMs) {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
@@ -373,7 +379,9 @@ async function main(session) {
     // Reconnect: the container restarts while the tone plays; no click in the tab from here on.
     record('reconnect: the same tab reconnects after the container restarts',
         await restartContainer(session), {});
+    let started = Date.now();
     await waitFor(session, AUDIO_ON, 'the audio stream reopening', 15000).catch(() => {});
+    const reopenMs = Date.now() - started;
     state = await session.evaluate(STATE);
     record('reconnect: audio comes back on with no click', state.enabled === '1' &&
         audioOn(state), state);
@@ -381,7 +389,9 @@ async function main(session) {
     record('reconnect: silence before the page plays again', isSilent(measured),
         rounded(measured));
     let playing = await clickInContainer(true);
+    started = Date.now();
     measured = await measureUntil(session, isTone, 15000);
+    const toneMs = Date.now() - started;
     state = await session.evaluate(STATE);
     record('reconnect: the page\'s tone plays again with no click in the tab',
         playing && isTone(measured), {
@@ -399,15 +409,18 @@ async function main(session) {
     record('muted: the speaker icon mutes audio before the restart', mutedState(state), state);
     record('muted: the same tab reconnects after the container restarts',
         await restartContainer(session), {});
-    // As long as the reconnect case above gives audio to come back on: it must not.
-    await waitFor(session, AUDIO_ON, 'the audio stream reopening', 15000).catch(() => {});
+    // Long enough for audio to have come back on, as it did in the reconnect case: it must not.
+    const reopenWaitMs = negativeWaitMs(reopenMs);
+    await waitFor(session, AUDIO_ON, 'the audio stream reopening', reopenWaitMs).catch(() => {});
     state = await session.evaluate(STATE);
-    record('muted: audio stays off after the reconnect', mutedState(state), state);
+    record('muted: audio stays off after the reconnect', mutedState(state),
+        { ...state, waitedMs: reopenWaitMs, reconnectCaseMs: reopenMs });
     playing = await clickInContainer(true);
-    // As long as the reconnect case above waits for the tone; any sound in it fails the case.
-    measured = await measureUntil(session, m => !isSilent(m), 15000);
+    // Long enough for the tone to have played, as in the reconnect case; any sound fails it.
+    const toneWaitMs = negativeWaitMs(toneMs);
+    measured = await measureUntil(session, m => !isSilent(m), toneWaitMs);
     record('muted: the page\'s tone stays silent', playing && isSilent(measured),
-        { playing, ...rounded(measured) });
+        { playing, ...rounded(measured), waitedMs: toneWaitMs, reconnectCaseMs: toneMs });
     await clickInContainer(false);
 }
 

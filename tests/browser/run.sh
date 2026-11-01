@@ -21,6 +21,9 @@
 # reconnects to) does to sound that was on, and to sound that was muted (see
 # that file).
 #
+# The two browsers' checks run at the same time, each with its own container,
+# tunnel and profiles; their results print in order once both are done.
+#
 # Last, switching windows from the web UI, in each browser: a throwaway container
 # as above but with private-only browsing off (FIREFOX_PRIVATE_BROWSING=false,
 # whatever .env sets) and showing tests/e2e/blank-page.html, so it can have a
@@ -40,19 +43,29 @@ FIREFOX="/Applications/Firefox.app/Contents/MacOS/firefox"
 WORK=$(mktemp -d)
 SERVER_PID=""
 CONTAINER=""
-WEB_CONTAINER="web-ui-$$"
+# Each browser's web UI container is web-ui-PID-KIND (browser_checks sets it).
+WEB_CONTAINER=""
 TUNNEL_PID=""
+CHECK_PIDS=()
+# As in tests/e2e/run.sh: the test containers have no network, so a resolver
+# that refuses at once keeps Firefox from waiting out DNS timeouts as it quits
+# (each `docker restart` below quits it).
+NO_DNS_ARGS=(--dns 127.0.0.1 --dns-opt timeout:1 --dns-opt attempts:1)
 
 stop_web_ui() {
     [[ -n "$TUNNEL_PID" ]] && kill "$TUNNEL_PID" 2>/dev/null || true
     TUNNEL_PID=""
-    docker rm -f "$WEB_CONTAINER" >/dev/null 2>&1 || true
+    [[ -z "$WEB_CONTAINER" ]] || docker rm -f "$WEB_CONTAINER" >/dev/null 2>&1 || true
 }
 
 cleanup() {
+    local pid
+    for pid in ${CHECK_PIDS[@]+"${CHECK_PIDS[@]}"}; do
+        kill "$pid" 2>/dev/null || true
+    done
     [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true
     [[ -n "$CONTAINER" ]] && docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    stop_web_ui
+    docker rm -f "web-ui-$$-chrome" "web-ui-$$-firefox" >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -176,8 +189,8 @@ start_web_ui() {
     local page=$1 title=$2 window="" port=""
     shift 2
     stop_web_ui
-    docker run -d --rm --name "$WEB_CONTAINER" --network none --shm-size 1g \
-        "$@" \
+    docker run -d --rm --name "$WEB_CONTAINER" --network none "${NO_DNS_ARGS[@]}" \
+        --shm-size 1g "$@" \
         -e "FF_OPEN_URL=file:///e2e/$page" \
         -e FF_PREF_NO_DATA_BAR=datareporting.policy.dataSubmissionPolicyBypassNotification=true \
         -v "$REPO/tests/e2e:/e2e:ro" \
@@ -196,15 +209,15 @@ start_web_ui() {
         return 1
     fi
     python3 -I "$BROWSER_DIR/tunnel.py" 0 docker exec -i "$WEB_CONTAINER" nc -N 127.0.0.1 5800 \
-        >"$WORK/tunnel.out" 2>&1 &
+        >"$WORK/tunnel-$WEB_CONTAINER.out" 2>&1 &
     TUNNEL_PID=$!
     for _ in $(seq 1 50); do
-        port=$(sed -n 's/^listening on 127\.0\.0\.1:\([0-9]*\)$/\1/p' "$WORK/tunnel.out")
+        port=$(sed -n 's/^listening on 127\.0\.0\.1:\([0-9]*\)$/\1/p' "$WORK/tunnel-$WEB_CONTAINER.out")
         [[ -n "$port" ]] && break
         sleep 0.1
     done
     if [[ -z "$port" ]]; then
-        echo "tunnel.py did not start: $(cat "$WORK/tunnel.out")"
+        echo "tunnel.py did not start: $(cat "$WORK/tunnel-$WEB_CONTAINER.out")"
         return 1
     fi
     WEB_UI_URL="http://127.0.0.1:$port/"
@@ -214,8 +227,8 @@ start_web_ui() {
 web_ui_audio() {
     local result
     # Not in $(...): the tunnel and WEB_UI_URL must outlive the call.
-    if ! start_web_ui audio-page.html "e2e audio page" "${SERVICE_ARGS[@]}" >"$WORK/start.out"; then
-        report "$3 web UI" "$(cat "$WORK/start.out")" "$WEB_UI_CASES"
+    if ! start_web_ui audio-page.html "e2e audio page" "${SERVICE_ARGS[@]}" >"$WORK/start-$1.out"; then
+        report "$3 web UI" "$(cat "$WORK/start-$1.out")" "$WEB_UI_CASES"
         stop_web_ui
         return
     fi
@@ -228,8 +241,8 @@ web_ui_audio() {
 # web_ui_windows KIND BINARY LABEL: switching windows from the web UI in browser KIND.
 web_ui_windows() {
     local result
-    if ! start_web_ui blank-page.html "e2e blank page" "${OFF_ARGS[@]}" >"$WORK/start.out"; then
-        report "$3 windows" "$(cat "$WORK/start.out")" "$WINDOWS_CASES"
+    if ! start_web_ui blank-page.html "e2e blank page" "${OFF_ARGS[@]}" >"$WORK/start-$1.out"; then
+        report "$3 windows" "$(cat "$WORK/start-$1.out")" "$WINDOWS_CASES"
         stop_web_ui
         return
     fi
@@ -245,34 +258,53 @@ if [[ " ${SERVICE_ARGS[*]} " != *" WEB_AUDIO=1 "* ]]; then
     failures=$((failures + 1))
 fi
 
-if [[ -x "$CHROME" ]]; then
-    browsers=$((browsers + 1))
-    version=$("$CHROME" --version | sed 's/ *$//')
-    result=$("$CHROME" --headless=new --disable-gpu --no-first-run \
-        --user-data-dir="$WORK/profiles/chrome" --virtual-time-budget=10000 \
-        --dump-dom "$URL" 2>/dev/null | sed -n 's:.*<pre id="result">\(.*\)</pre>.*:\1:p')
-    report "$version cursor" "$result" "$EXPECTED"
-    result=$(node "$BROWSER_DIR/page-result.mjs" chrome "$CHROME" "$WORK/profiles/chrome-audio" \
-        "$(free_port)" "$AUDIO_URL" "$AUDIO_CLICK_TITLE") || true
-    report "$version audio" "$result" "$AUDIO_CASES"
-    web_ui_audio chrome "$CHROME" "$version"
-    web_ui_windows chrome "$CHROME" "$version"
-fi
+# browser_checks KIND BINARY: every check in browser KIND (chrome or firefox),
+# in its own web UI container; exits 1 if any failed. Run in a subshell.
+browser_checks() {
+    local kind=$1 binary=$2 version result
+    WEB_CONTAINER="web-ui-$$-$kind"
+    trap stop_web_ui EXIT
+    failures=0
+    if [[ "$kind" == chrome ]]; then
+        version=$("$binary" --version | sed 's/ *$//')
+        result=$("$binary" --headless=new --disable-gpu --no-first-run \
+            --user-data-dir="$WORK/profiles/chrome" --virtual-time-budget=10000 \
+            --dump-dom "$URL" 2>/dev/null | sed -n 's:.*<pre id="result">\(.*\)</pre>.*:\1:p')
+        report "$version cursor" "$result" "$EXPECTED"
+        result=$(node "$BROWSER_DIR/page-result.mjs" chrome "$binary" \
+            "$WORK/profiles/chrome-audio" "$(free_port)" "$AUDIO_URL" "$AUDIO_CLICK_TITLE") || true
+        report "$version audio" "$result" "$AUDIO_CASES"
+    else
+        version=$("$binary" --version)
+        mkdir -p "$WORK/profiles/firefox" "$WORK/profiles/firefox-audio" \
+            "$WORK/profiles/firefox-web-ui" "$WORK/profiles/firefox-windows"
+        result=$(node "$BROWSER_DIR/page-result.mjs" firefox "$binary" "$WORK/profiles/firefox" \
+            "$(free_port)" "$URL") || true
+        report "$version cursor" "$result" "$EXPECTED"
+        result=$(node "$BROWSER_DIR/page-result.mjs" firefox "$binary" \
+            "$WORK/profiles/firefox-audio" "$(free_port)" "$AUDIO_URL" "$AUDIO_CLICK_TITLE") ||
+            true
+        report "$version audio" "$result" "$AUDIO_CASES"
+    fi
+    web_ui_audio "$kind" "$binary" "$version"
+    web_ui_windows "$kind" "$binary" "$version"
+    ((failures == 0))
+}
 
-if [[ -x "$FIREFOX" ]]; then
+kinds=()
+for kind in chrome firefox; do
+    if [[ "$kind" == chrome ]]; then binary=$CHROME; else binary=$FIREFOX; fi
+    [[ -x "$binary" ]] || continue
     browsers=$((browsers + 1))
-    version=$("$FIREFOX" --version)
-    mkdir -p "$WORK/profiles/firefox" "$WORK/profiles/firefox-audio" "$WORK/profiles/firefox-web-ui" \
-        "$WORK/profiles/firefox-windows"
-    result=$(node "$BROWSER_DIR/page-result.mjs" firefox "$FIREFOX" "$WORK/profiles/firefox" \
-        "$(free_port)" "$URL") || true
-    report "$version cursor" "$result" "$EXPECTED"
-    result=$(node "$BROWSER_DIR/page-result.mjs" firefox "$FIREFOX" \
-        "$WORK/profiles/firefox-audio" "$(free_port)" "$AUDIO_URL" "$AUDIO_CLICK_TITLE") || true
-    report "$version audio" "$result" "$AUDIO_CASES"
-    web_ui_audio firefox "$FIREFOX" "$version"
-    web_ui_windows firefox "$FIREFOX" "$version"
-fi
+    (browser_checks "$kind" "$binary") >"$WORK/$kind.out" 2>&1 &
+    CHECK_PIDS+=("$!")
+    kinds+=("$kind")
+done
+for i in "${!kinds[@]}"; do
+    wait "${CHECK_PIDS[$i]}" || failures=$((failures + 1))
+    cat "$WORK/${kinds[$i]}.out"
+done
+CHECK_PIDS=()
 
 if ((browsers == 0)); then
     echo "FAIL  no browser found (looked for $CHROME and $FIREFOX)"
