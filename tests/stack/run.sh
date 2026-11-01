@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # End-to-end test of the running stack (docker compose up -d first).
 #
+# It connects from this computer itself only to localhost, and to this
+# computer's own addresses (that the web UIs are not published there); every
+# look at the outside world from the host's side goes through a throwaway
+# container on Docker's default network (see PY_IMAGE).
+#
 # Checks real behavior, not just container status:
 #   - every service runs the image docker-compose.yml pins, and is healthy;
 #     Autoheal's image, built here, has the labels of the commit and base image
@@ -51,6 +56,12 @@ REPO=$(cd "$STACK_DIR/../.." && pwd)
 # by tag and multi-arch index digest, like docker-compose.yml's images; to
 # update: docker buildx imagetools inspect alpine:<tag> (the top "Digest:").
 PLAIN_IMAGE=alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+# The same, with Python, for the DNS lookups on the host's path (DNS_TXT_PY).
+# The suite looks at the outside world from this computer only through such
+# containers: a lookup from a process on the Mac itself would be its own
+# outgoing connection, which a firewall on the Mac (such as Little Snitch) may
+# hold for a person to answer. Same pin as tests/e2e/run.sh's PROBE_IMAGE.
+PY_IMAGE=python:3.13.18-alpine3.24@sha256:7984cf56ceaddebe4fefeb75d64000b9f45d8b77b11a09b24524da6cdc3af0c8
 # Services that answer with the caller's public IP, in order of preference;
 # the second is the fallback when the first fails or rate-limits.
 IP_SERVICES="https://ipinfo.io/ip https://api.ipify.org"
@@ -163,9 +174,17 @@ public_ip() {
 
 # A DNS TXT query over UDP with the Python standard library (the images have no
 # dig): python3 -I -c "$DNS_TXT_PY" NAME SERVER prints one line per TXT record.
+# SERVER "resolv.conf" is the first IPv4 nameserver in /etc/resolv.conf.
 DNS_TXT_PY='
-import random, socket, struct, sys
+import ipaddress, random, socket, struct, sys
 name, server = sys.argv[1:]
+if server == "resolv.conf":
+    with open("/etc/resolv.conf") as conf:
+        server = next(
+            words[1] for words in (line.split() for line in conf)
+            if len(words) > 1 and words[0] == "nameserver"
+            and ipaddress.ip_address(words[1].split("%")[0]).version == 4
+        )
 qid = random.randrange(65536)
 query = struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0) + b"".join(
     bytes([len(label)]) + label.encode() for label in name.rstrip(".").split(".")
@@ -198,12 +217,14 @@ for _ in range(answers):
         print(" ".join(strings))
     i += length'
 # TXT records of NAME as seen through Gluetun's DNS from qBittorrent (the VPN's
-# network), or through the host's resolver: txt_lookup vpn|host NAME
+# network), or on the host's path: from a container on Docker's default
+# network, through its resolver (Docker's, which asks the host's): txt_lookup
+# vpn|host NAME
 txt_lookup() {
     if [[ "$1" == vpn ]]; then
         docker exec "$QBT" python3 -I -c "$DNS_TXT_PY" "$2" 127.0.0.1
     else
-        python3 -I -c "$DNS_TXT_PY" "$2" "$(awk '$1 == "nameserver" && $2 ~ /^[0-9.]+$/ { print $2; exit }' /etc/resolv.conf)"
+        docker run --rm "$PY_IMAGE" python -I -c "$DNS_TXT_PY" "$2" resolv.conf
     fi
 }
 # The autonomous system number announcing an IPv4 or IPv6 address (Team
@@ -508,7 +529,9 @@ else
     fail "IPv6 firewall OUTPUT rules: ${rules6_verdict#FAIL }"
 fi
 # The host's IPv6 source address, if it has an IPv6 route (a UDP connect sends
-# nothing), and its IPv6 egress address as an IPv6-only service sees it.
+# nothing). Its /64 is the host's network: an address from it would be a leak.
+# Not the address an outside service sees: asking one from this computer would
+# be an outgoing connection of its own (see PY_IMAGE).
 host_src6=$(python3 -I -c '
 import ipaddress, socket
 try:
@@ -518,10 +541,6 @@ try:
         print(address if address.is_global else "")
 except OSError:
     print("")')
-host_ip6=""
-if [[ -n "$host_src6" ]]; then
-    host_ip6=$(retry_ip curl -6 -s --max-time 10 https://api6.ipify.org) || host_ip6=""
-fi
 ns6_rc=0
 ns_ip6=$(docker exec "$QBT" curl -6 -s --max-time 10 https://api6.ipify.org 2>/dev/null) || ns6_rc=$?
 # Positive control: the same service over IPv4 from the same namespace.
@@ -529,13 +548,11 @@ ns_ip4=$(retry_ip docker exec "$QBT" curl -4 -s --max-time 10 https://api64.ipif
 tun_ip6=$(docker exec "$VPN" ip -6 -o addr show dev "${tun_if:-none}" scope global 2>/dev/null || true)
 ipv6_verdict=$(python3 -I -c '
 import ipaddress, sys
-host_src6, host_ip6, rc, ns_ip6, ns_ip4, vpn_ip, tun_ip6 = sys.argv[1:]
-if host_src6 and not host_ip6:
-    sys.exit(f"FAIL inconclusive: the host has IPv6 ({host_src6}) but api6.ipify.org did not answer it")
+host_src6, rc, ns_ip6, ns_ip4, vpn_ip, tun_ip6 = sys.argv[1:]
 if not vpn_ip or ns_ip4 != vpn_ip:
     sys.exit(f"FAIL inconclusive: over IPv4 the namespace got {ns_ip4!r}, the VPN IP is {vpn_ip!r}")
-host_net = ipaddress.ip_network(host_ip6 + "/64", strict=False) if host_ip6 else None
-host_note = "the host has IPv6 egress" if host_ip6 else "the host has no IPv6"
+host_net = ipaddress.ip_network(host_src6 + "/64", strict=False) if host_src6 else None
+host_note = f"the host has IPv6 in {host_net}" if host_net else "the host has no IPv6"
 if rc == "0":
     try:
         address = ipaddress.ip_address(ns_ip6.strip())
@@ -550,7 +567,7 @@ elif rc in ("7", "28"):
     print(f"OK IPv6 egress fails (curl exit {rc}); over IPv4 the same service sees the VPN IP; {host_note}")
 else:
     print(f"FAIL inconclusive: IPv6 request failed with curl exit {rc}")' \
-    "$host_src6" "$host_ip6" "$ns6_rc" "$ns_ip6" "$ns_ip4" "$vpn_ip" "$tun_ip6" 2>&1 || true)
+    "$host_src6" "$ns6_rc" "$ns_ip6" "$ns_ip4" "$vpn_ip" "$tun_ip6" 2>&1 || true)
 if [[ "$ipv6_verdict" == OK* ]]; then
     pass "${ipv6_verdict#OK }"
 else
