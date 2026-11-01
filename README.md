@@ -472,6 +472,9 @@ fetches an unpinned BuildKit frontend and builds on Alpine 3.18.
 ### Automated Tests
 
 ```bash
+tests/run-all.sh       # the unit tests and the stack, e2e and browser suites below, all at
+                       # the same time (about 3 minutes); each suite's log in one directory;
+                       # `tests/run-all.sh e2e browser` runs only those
 tests/stack/run.sh     # the running stack: VPN egress and kill switch, DNS, port forwarding,
                        # qSticky, qBittorrent (API, settings, watch folder), Firefox, Autoheal
                        # and its Docker socket proxy, loopback-only web UI ports
