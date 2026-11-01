@@ -100,10 +100,15 @@ WORK=$(mktemp -d)
 # server with nothing listening refuses at once, as a network that is down
 # would (docs/agents_output/debugging/shutdown-key-and-appmenu.md).
 NO_DNS_ARGS=(--dns 127.0.0.1 --dns-opt timeout:1 --dns-opt attempts:1)
+# The VNC probes (cursor and color) run in one long-lived container in the test
+# container's network namespace, started with each test container
+# (start_probe): a container per probe cost a start each (0.23 s against
+# 0.04 s for a docker exec, measured).
+PROBE_CONTAINER="$CONTAINER-probe"
 
 cleanup() {
     docker rm -f "$CONTAINER-web" "$CONTAINER-stun" "$CONTAINER-overlays" "$CONTAINER-bad" \
-        "$CONTAINER" >/dev/null 2>&1 || true
+        "$PROBE_CONTAINER" "$CONTAINER" >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -203,6 +208,19 @@ if ! [[ "$DISPLAY_W" =~ ^[0-9]+$ && "$DISPLAY_H" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
+# Starts PROBE_CONTAINER in the network namespace of the test container that
+# was just started, with tests/e2e at /e2e and WORK at /out.
+start_probe() {
+    docker run -d --rm --name "$PROBE_CONTAINER" --network "container:$CONTAINER" \
+        -v "$E2E_DIR:/e2e:ro" -v "$WORK:/out" "$PROBE_IMAGE" sleep infinity >/dev/null
+}
+# probe SCRIPT ARGS...: runs tests/e2e/SCRIPT in PROBE_CONTAINER.
+probe() {
+    local script=$1
+    shift
+    docker exec "$PROBE_CONTAINER" python -I "/e2e/$script" "$@"
+}
+
 # Starts the test container with the native-css theme from THEME_DIR and waits
 # for the test page. Sets WINDOW to Firefox's X window id.
 start_firefox() {
@@ -210,7 +228,7 @@ start_firefox() {
     for arg in "${SERVICE_ARGS[@]}"; do
         args+=("${arg/#$NATIVE_CSS_SOURCE:/$theme_dir:}")
     done
-    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f "$PROBE_CONTAINER" "$CONTAINER" >/dev/null 2>&1 || true
     docker run -d --rm --name "$CONTAINER" --network none "${NO_DNS_ARGS[@]}" \
         --shm-size 1g \
         "${args[@]}" \
@@ -219,6 +237,7 @@ start_firefox() {
         -e FF_PREF_NO_DATA_BAR=datareporting.policy.dataSubmissionPolicyBypassNotification=true \
         -v "$E2E_DIR/cursor-page.html:/e2e/cursor-page.html:ro" \
         "$IMAGE" >/dev/null
+    start_probe
 
     echo "waiting for Firefox to show the test page..."
     for _ in $(seq 1 90); do
@@ -250,9 +269,7 @@ check_cell() {
     row=$((index / COLUMNS))
     x=$((column * CELL_W + CELL_W / 2))
     y=$((row * CELL_H + CELL_H / 2))
-    summary=$(docker run --rm --network "container:$CONTAINER" \
-        -v "$E2E_DIR:/e2e:ro" -v "$WORK:/out" "$PROBE_IMAGE" \
-        python -I /e2e/rfb_cursor_probe.py 127.0.0.1 5900 "$x" "$y" "/out/cell$index")
+    summary=$(probe rfb_cursor_probe.py 127.0.0.1 5900 "$x" "$y" "/out/cell$index")
     actual=$(node "$E2E_DIR/decode.mjs" "$summary" "$WORK/cell$index.rgba")
     if [[ "$actual" == "$expected" ]] ||
         [[ "$expected" == "image:any" && "$actual" == image:* ]]; then
@@ -344,7 +361,7 @@ check_cell 8 "text"      # cursor: text
 start_firefox_windowed() {
     local page=${1:-blank-page.html} title=${2:-e2e blank page}
     shift $(($# < 2 ? $# : 2))
-    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    docker rm -f "$PROBE_CONTAINER" "$CONTAINER" >/dev/null 2>&1 || true
     docker run -d --rm --name "$CONTAINER" --network none "${NO_DNS_ARGS[@]}" \
         --shm-size 1g \
         "${FIREFOX_ARGS[@]}" "$@" \
@@ -352,6 +369,7 @@ start_firefox_windowed() {
         -e FF_PREF_NO_DATA_BAR=datareporting.policy.dataSubmissionPolicyBypassNotification=true \
         -v "$E2E_DIR:/e2e:ro" \
         "$IMAGE" >/dev/null
+    start_probe
     echo "waiting for Firefox to show $page..."
     WINDOW=""
     for _ in $(seq 1 90); do
@@ -384,9 +402,7 @@ check_drag() {
         in_x xdotool mousemove $((x + (x2 - x) * step / 5)) $((y + (y2 - y) * step / 5))
         sleep 0.05
     done
-    summary=$(docker run --rm --network "container:$CONTAINER" \
-        -v "$E2E_DIR:/e2e:ro" -v "$WORK:/out" "$PROBE_IMAGE" \
-        python -I /e2e/rfb_cursor_probe.py 127.0.0.1 5900 "$x2" "$y2" "/out/$label")
+    summary=$(probe rfb_cursor_probe.py 127.0.0.1 5900 "$x2" "$y2" "/out/$label")
     in_x xdotool mouseup "$button"
     if [[ "$modifier" != none ]]; then
         in_x xdotool keyup "$modifier"
@@ -426,9 +442,7 @@ check_drag alt-right-drag alt 3 $((mid_x + 540)) $((mid_y + 260)) \
 check_point() {
     local label=$1 x=$2 y=$3 expected=$4 summary actual
     checks=$((checks + 1))
-    summary=$(docker run --rm --network "container:$CONTAINER" \
-        -v "$E2E_DIR:/e2e:ro" -v "$WORK:/out" "$PROBE_IMAGE" \
-        python -I /e2e/rfb_cursor_probe.py 127.0.0.1 5900 "$x" "$y" "/out/$label")
+    summary=$(probe rfb_cursor_probe.py 127.0.0.1 5900 "$x" "$y" "/out/$label")
     actual=$(node "$E2E_DIR/decode.mjs" "$summary" "$WORK/$label.rgba")
     if [[ "$actual" == "$expected" ]]; then
         printf 'ok    %-20s %-16s (%d,%d)\n' "$label" "$actual" "$x" "$y"
@@ -819,29 +833,46 @@ check_single_window() {
 # Counts the pixels within TOLERANCE of COLOR (RRGGBB) in the screen region
 # X Y W H, read over VNC; prints rfb_color_probe.py's JSON summary.
 count_color() {
-    docker run --rm --network "container:$CONTAINER" \
-        -v "$E2E_DIR:/e2e:ro" "$PROBE_IMAGE" \
-        python -I /e2e/rfb_color_probe.py 127.0.0.1 5900 "$@"
+    probe rfb_color_probe.py 127.0.0.1 5900 "$@"
 }
 
 # Firefox's own "Private browsing" indicator (userChrome.css shows it with
 # permanent private browsing) at the end of the tab strip. Its mask icon has a
 # fixed #8000D7 fill; measured on v26.09.1: about 90 such pixels in the 44px
 # strip, and none with private browsing off. Reads the strip until the icon
-# shows or 15 s pass (it may still be drawing), and sets INDICATOR to the last
-# summary and INDICATOR_PIXELS to its count.
+# shows or WAIT_S (default 15) seconds pass (it may still be drawing), and sets
+# INDICATOR to the last summary and INDICATOR_PIXELS to its count:
+# read_indicator [WAIT_S]. INDICATOR_SHOW_S is the longest it took to show so
+# far in this run (whole seconds), or "" before it has shown.
 INDICATOR_MIN=50
+INDICATOR_SHOW_S=""
 read_indicator() {
-    local deadline=$((SECONDS + 15))
+    local start=$SECONDS deadline=$((SECONDS + ${1:-15}))
     while :; do
         INDICATOR=$(count_color 0 0 "$DISPLAY_W" 44 8000d7 16)
         INDICATOR_PIXELS=$(sed -n 's/.*"matches": \([0-9]*\).*/\1/p' <<<"$INDICATOR")
         INDICATOR_PIXELS=${INDICATOR_PIXELS:-0}
-        if ((INDICATOR_PIXELS >= INDICATOR_MIN || SECONDS >= deadline)); then
+        if ((INDICATOR_PIXELS >= INDICATOR_MIN)); then
+            if [[ -z "$INDICATOR_SHOW_S" ]] || ((SECONDS - start > INDICATOR_SHOW_S)); then
+                INDICATOR_SHOW_S=$((SECONDS - start))
+            fi
             return 0
         fi
+        ((SECONDS < deadline)) || return 0
         sleep 1
     done
+}
+# How long to read the strip to see that the icon does not show: three times
+# the longest it took to show in this run, at least 3 s, at most 15 s (15 s
+# before it has shown).
+indicator_absent_wait() {
+    local wait=15
+    if [[ -n "$INDICATOR_SHOW_S" ]]; then
+        wait=$((INDICATOR_SHOW_S * 3))
+        ((wait >= 3)) || wait=3
+        ((wait <= 15)) || wait=15
+    fi
+    echo "$wait"
 }
 
 # Prints the process id of Firefox's main process (not a content process), or
@@ -1116,11 +1147,12 @@ start_web_server() {
 }
 
 # Stops the test container as `docker stop` stops the service: the image's
-# shutdown script quits Firefox with Ctrl+Q, so it saves the profile. Waits
-# until Docker has removed it (--rm), so its name is free again.
+# shutdown script quits Firefox with its shutdown key (config/firefox-services/kill),
+# so it saves the profile. Waits until Docker has removed it (--rm), so its
+# name is free again.
 stop_firefox() {
     local deadline=$((SECONDS + 60))
-    docker rm -f "$CONTAINER-web" >/dev/null 2>&1 || true
+    docker rm -f "$CONTAINER-web" "$PROBE_CONTAINER" >/dev/null 2>&1 || true
     docker stop "$CONTAINER" >/dev/null
     while docker inspect "$CONTAINER" >/dev/null 2>&1; do
         if ((SECONDS >= deadline)); then
@@ -1422,8 +1454,7 @@ check_audio() {
 # Reads the web UI's audio WebSocket for SECONDS and checks it against EXPECT
 # (silence or $TONE); prints ws_audio_probe.py's summary.
 ws_audio() {
-    docker run --rm --network "container:$CONTAINER" -v "$E2E_DIR:/e2e:ro" "$PROBE_IMAGE" \
-        python -I /e2e/ws_audio_probe.py ws 127.0.0.1 5800 "$1" "$2"
+    probe ws_audio_probe.py ws 127.0.0.1 5800 "$1" "$2"
 }
 
 # The audio services run and have their sockets, and nginx relays the stream.
@@ -1459,8 +1490,7 @@ firefox_pulse_server() {
 # each socket a process holds. Fails if nothing listens on PulseAudio's socket.
 firefox_pulse_connections() {
     local clients held
-    clients=$(docker run --rm --network "container:$CONTAINER" -v "$E2E_DIR:/e2e:ro" \
-        "$PROBE_IMAGE" python -I /e2e/unix_peers_probe.py /tmp/pulseaudio.sock) || return 1
+    clients=$(probe unix_peers_probe.py /tmp/pulseaudio.sock) || return 1
     held=$(docker exec -u 1000:1000 "$CONTAINER" ls -l "/proc/$FIREFOX_PID/fd" |
         sed -n 's/.*socket:\[\([0-9]*\)\].*/\1/p') || return 1
     python3 -I -c '
@@ -1543,7 +1573,11 @@ fi
 # "yes") or not ("no") in the test container's tab strip.
 check_indicator() {
     checks=$((checks + 1))
-    read_indicator
+    if [[ "$2" == no ]]; then
+        read_indicator "$(indicator_absent_wait)"
+    else
+        read_indicator
+    fi
     if [[ "$2" == yes ]] && ((INDICATOR_PIXELS >= INDICATOR_MIN)); then
         printf 'ok    %-22s shown: %s\n' "$1" "$INDICATOR"
     elif [[ "$2" == no ]] && ((INDICATOR_PIXELS < INDICATOR_MIN)); then
