@@ -477,7 +477,8 @@ tests/stack/run.sh     # the running stack: VPN egress and kill switch, DNS, por
                        # and its Docker socket proxy, loopback-only web UI ports
 tests/e2e/run.sh       # Firefox in throwaway containers: cursors, single window, private browsing
                        # on and off (and switching), downloads, WebRTC, sound to the web UI's
-                       # audio stream
+                       # audio stream; its scenarios run in groups at the same time, and
+                       # `tests/e2e/run.sh 7 8` runs only scenarios 7 and 8
 tests/browser/run.sh   # the web UI in headless Chrome and Firefox: the patched noVNC cursor,
                        # the audio player, and sound through the real web UI of a throwaway
                        # container, also across a restart of it; Ctrl+` through the web UI
