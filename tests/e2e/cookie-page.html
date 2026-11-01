@@ -4,12 +4,18 @@
 <meta charset="utf-8">
 <title>e2e cookie page</title>
 <script>
-// Says in the title whether the cookie an earlier visit set came back, then sets it
-// (for a day). run.sh loads the page over HTTP from inside the container's network
-// (torrent_server.py), restarts the container on the same /config, and loads it again.
-const kept = document.cookie.split("; ").includes("e2e=kept");
-document.cookie = "e2e=kept; max-age=86400; path=/; SameSite=Lax";
-document.title = "e2e cookie page earlier-cookie=" + (kept ? "yes" : "no");
+// Says in the title which of its cookies the browser sent (e2e-<name>, sorted,
+// or "none"), then sets e2e-<fragment> ("e2e-main" without one) for a day.
+// run.sh loads it over HTTP from inside the container's network
+// (torrent_server.py): across a container restart on the same /config, and
+// in a normal and a private window, which keep separate cookies.
+const names = document.cookie.split("; ")
+    .map(cookie => cookie.split("=")[0])
+    .filter(name => name.startsWith("e2e-"))
+    .sort();
+document.cookie = "e2e-" + (location.hash.slice(1) || "main") +
+    "=kept; max-age=86400; path=/; SameSite=Lax";
+document.title = "e2e cookie page cookies=" + (names.join(",") || "none");
 </script>
 </head>
 <body></body>

@@ -29,7 +29,8 @@
 #     name but localhost and 127.0.0.1, and its clients' URLs still work
 #   - the Firefox web UI (serving the patched noVNC files, ui.js with the
 #     content hash that busts caches), private browsing as FIREFOX_PRIVATE_BROWSING
-#     in .env sets it, and the single window
+#     in .env sets it, and at most one maximized window of each kind (normal,
+#     private)
 #   - Autoheal reaches Docker only through its socket proxy, which lets it list
 #     containers and restart one, and refuses everything else (create, inspect,
 #     exec, stop)
@@ -972,11 +973,13 @@ done
 # file does, so a browser that has an older ui.js cached fetches the new one.
 web_version=$(curl -s --max-time 10 "$FIREFOX_URL/webdata.json" |
     python3 -I -c 'import json, sys; print(json.load(sys.stdin)["webUniqueVersion"])' || true)
-if [[ -n "$web_version" ]] &&
-    curl -s --max-time 10 "$FIREFOX_URL/" | grep -qF "./app/ui.js?v=$web_version\""; then
+# Read into a variable first: `curl | grep -q` under pipefail fails when grep stops at
+# the match before curl has written the rest (measured: curl exit 23, about 1 in 30).
+index_html=$(curl -s --max-time 10 "$FIREFOX_URL/" || true)
+if [[ -n "$web_version" ]] && grep -qF "./app/ui.js?v=$web_version\"" <<<"$index_html"; then
     pass "index.html loads ui.js with the web UI's content hash ($web_version)"
 else
-    fail "index.html does not load ./app/ui.js?v=<webUniqueVersion> ('$web_version')"
+    fail "index.html (${#index_html} bytes) does not load ./app/ui.js?v=<webUniqueVersion> ('$web_version')"
 fi
 # Permanent private browsing follows FIREFOX_PRIVATE_BROWSING in .env, as Compose
 # resolves it (config.json above): the running container got that entry, its init
@@ -1015,12 +1018,34 @@ if [[ -n "$private_mode" && "$running_entry" == "$private_entry" && "$private_li
 else
     fail "private browsing: Compose resolves '$private_entry', the container has '$running_entry', prefs.js has '${private_line:-no line}'; init log: $(grep -F 54-firefox-private-browsing.sh <<<"$firefox_log" | tail -n 1)"
 fi
-windows=$(docker exec -u "$FIREFOX_UID" -e DISPLAY=:0 "$FIREFOX" \
-    xdotool search --onlyvisible --classname Navigator 2>/dev/null | wc -l | tr -d ' ')
-if [[ "$windows" == 1 ]]; then
-    pass "Firefox shows exactly one window"
+# Firefox keeps at most one normal and one private window (a private window's title
+# ends in "Private Browsing" unless every window is private), each maximized over the
+# whole display. The display's size now, not DISPLAY_WIDTH/HEIGHT: the web UI resizes
+# it to the browser tab that shows it (measured: 1728x998 with a 1920x1080 setting).
+firefox_x() { docker exec -u "$FIREFOX_UID" -e DISPLAY=:0 "$FIREFOX" "$@"; }
+display=$(firefox_x xdotool getdisplaygeometry 2>/dev/null | tr ' ' x || true)
+normal_windows=0
+private_windows=0
+window_problems=""
+[[ "$display" =~ ^[0-9]+x[0-9]+$ ]] || window_problems=" the display's size is unknown ('$display');"
+for window in $(firefox_x xdotool search --onlyvisible --classname Navigator 2>/dev/null || true); do
+    if [[ "$(firefox_x xdotool getwindowname "$window" 2>/dev/null || true)" == *"Private Browsing" ]]; then
+        private_windows=$((private_windows + 1))
+    else
+        normal_windows=$((normal_windows + 1))
+    fi
+    geometry=$(firefox_x xdotool getwindowgeometry "$window" 2>/dev/null | tr -s ' ' | paste -sd ' ' - || true)
+    state=$(firefox_x obxprop --id "$window" 2>/dev/null | grep '^_NET_WM_STATE(ATOM)' || true)
+    if [[ "$geometry" != *"Position: 0,0 "*"Geometry: $display"* ]] ||
+        [[ "$state" != *_NET_WM_STATE_MAXIMIZED_VERT* || "$state" != *_NET_WM_STATE_MAXIMIZED_HORZ* ]]; then
+        window_problems+=" window $window: $geometry; $state;"
+    fi
+done
+if ((normal_windows + private_windows >= 1 && normal_windows <= 1 && private_windows <= 1)) &&
+    [[ -z "$window_problems" ]]; then
+    pass "Firefox shows $normal_windows normal and $private_windows private window(s), each maximized ($display)"
 else
-    fail "Firefox shows $windows windows"
+    fail "Firefox shows $normal_windows normal and $private_windows private window(s) (want at most one of each), maximized at $display:${window_problems:- yes}"
 fi
 
 echo "== Docker socket proxy"

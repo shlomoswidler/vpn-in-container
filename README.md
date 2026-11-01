@@ -156,12 +156,24 @@ docker compose stop
   container's own network addresses (the `FF_PREF_WEBRTC_*` entries in `docker-compose.yml`).
 - **Your own mouse cursors:** the web UI shows your computer's native cursors
   (see [config/cursors/README.md](config/cursors/README.md)).
-- **One window:** Firefox stays a single maximized window, since the container
-  has no way to switch between windows.
+- **One window of each kind, all full size:** every Firefox window is maximized over the whole
+  display (Openbox, the container's window manager, does that for every Firefox window), and
+  Firefox keeps at most one normal window and one private window, since the container has no
+  way to arrange windows.
   - Dropping a tab outside the tab strip leaves it where it was.
-  - Pop-ups, Shift+click and "Open in New Window" open tabs instead.
-  - Ctrl+N, Ctrl+Shift+P, Ctrl+Shift+N and Ctrl+Shift+W do nothing, and the menu
-    items that open or close windows are hidden.
+  - Pop-ups (`window.open()`, with or without a size), `target="_blank"` links, Shift+click and
+    "Open in New Window" open tabs instead, in the window of the page they came from: a new
+    window's tabs move into the open window of the same kind, normal or private.
+  - Private windows open as in Firefox itself: Ctrl+Shift+P, "New private window" in the app
+    menu and the File menu, "Open Link in New Private Window". When a private window is already
+    open, a new one's tabs join it.
+  - A private window covers the normal one, and there is no way back to the normal window short
+    of Ctrl+Q: nothing closes a window (see the next item), closing the private window's last
+    tab opens a new tab, its flame button ("Clear private session") keeps the window, and
+    Openbox has no keyboard shortcuts or title bar for Firefox's windows. Ctrl+Q restarts the
+    container with one normal window.
+  - Ctrl+N, Ctrl+Shift+N and Ctrl+Shift+W do nothing, and the menu items that open a normal
+    window or close a window are hidden.
   - Closing the last tab opens a new tab; the window stays.
   - Ctrl+Q still quits Firefox (the image's shutdown script relies on it); the
     container then stops and restarts.
@@ -196,10 +208,9 @@ FIREFOX_PRIVATE_BROWSING=true
   `=`) would leave private browsing off without a word, so the firefox container exits at start instead,
   with the reason in `docker compose logs firefox`, and `./start.sh` refuses it before starting
   anything. Unset or empty means off.
-- **One window, either way:** with private browsing off, a private window could not share
-  Firefox's one window (Firefox does not move tabs between private and normal windows), so
-  Ctrl+Shift+P does nothing, its menu items are hidden, and a private window opened any other
-  way (a toolbar button, an extension) is closed at once.
+- **Private windows:** with it off, Firefox opens private windows on request, as Firefox itself
+  does (see [How Firefox Behaves](#how-firefox-behaves-in-the-container)); with it on, every
+  window is private already.
 - **Downloads** go to the same folder either way. With private browsing on, Firefox's first
   download shows a "Files stay on your device" notice with a "Delete files automatically" button,
   which asks Firefox to delete files downloaded in private mode after the private session ends.
@@ -262,9 +273,9 @@ What is tested automatically (see [Automated Tests](#automated-tests)), and what
 
 ### Configure Torrent Control (First Time Only)
 
-The Torrent Control extension is pre-installed, and allowed in private windows (with
-`FIREFOX_PRIVATE_BROWSING=true` every window is private; with it off the permission is unused),
-both by `config/firefox-policies/policies.json`. Configure it once to enable one-click magnet
+The Torrent Control extension is pre-installed, and allowed in private windows (every window
+with `FIREFOX_PRIVATE_BROWSING=true`, and a private window you open otherwise), both by
+`config/firefox-policies/policies.json`. Configure it once to enable one-click magnet
 links:
 
 1. In Firefox (at `http://localhost:5800`), click the Torrent Control extension icon (puzzle piece in toolbar)
@@ -679,12 +690,12 @@ vpn-in-container/
 │   ├── firefox/            # Browser profile (gitignored)
 │   ├── firefox-autoconfig/
 │   │   ├── autoconfig.js   # Loads single-window.cfg (Firefox autoconfig)
-│   │   └── single-window.cfg  # Moves any second window's tabs into the first window (closes a
-│   │                          # private one when private browsing is off)
+│   │   └── single-window.cfg  # Moves a new window's tabs into the open window of its kind
+│   │                          # (normal or private)
 │   ├── firefox-chrome/
 │   │   └── userChrome.css  # No toolbar window dragging; hides new/close window menu items
 │   ├── firefox-profile/
-│   │   └── customKeys.json # Clears the new-window and close-window shortcuts
+│   │   └── customKeys.json # Clears the new-normal-window and close-window shortcuts
 │   ├── firefox-init.d/
 │   │   ├── 54-firefox-private-browsing.sh  # Refuses a FIREFOX_PRIVATE_BROWSING but true/false
 │   │   ├── 57-openbox-no-keepborder.sh  # Removes the 1px top border (unthemed cursor strip)

@@ -7,20 +7,18 @@
     -moz-window-dragging: no-drag !important;
 }
 
-/* Firefox runs as a single window here (see config/firefox-autoconfig/): hide
-   the menu items that would open a second window or close the only one
-   (quitting stops the container). Ctrl+Q still quits: the image's app shutdown
-   script sends it. */
+/* Firefox keeps one window of each kind, normal and private, here (see
+   config/firefox-autoconfig/): hide the menu items that would open a second
+   normal window, close a window (closing the last one stops the container) or
+   quit. The private-window items stay, as in Firefox itself: a new private
+   window's tabs join the private window if one is open. Ctrl+Q still quits:
+   the image's app shutdown script sends it. */
 #appMenu-new-window-button2,
-#appMenu-new-private-window-button2,
 #menu_newNavigator,
-#menu_newPrivateWindow,
 #menu_closeWindow,
 #context_openTabInWindow,
 #context-openlink,
-#context-openlinkprivate,
 #placesContext_open\:newwindow,
-#placesContext_open\:newprivatewindow,
 #appMenu-quit-button2,
 #menu_FileQuitItem {
     display: none !important;

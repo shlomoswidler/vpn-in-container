@@ -23,11 +23,12 @@
 # noVNC recognizes (config/novnc/core-glyphs.js).
 #
 # Scenario 5 checks that Firefox stays one maximized window: tab drags out of the
-# strip, new-window shortcuts, a Shift+clicked link, a window.open() pop-up and
-# window-closing shortcuts (config/firefox-autoconfig/,
-# config/firefox-profile/customKeys.json and the single-window FF_PREF_* entries).
-# After each, it checks the window's tabs (single-window-page.html titles each
-# page uniquely).
+# strip, new-window shortcuts, Ctrl+Shift+P, a Shift+clicked link, pop-ups
+# (window.open() with and without a size, a target="_blank" link), another
+# private window and window-closing shortcuts (config/firefox-autoconfig/,
+# config/firefox-profile/customKeys.json and the single-window FF_PREF_*
+# entries). After each, it checks the window's tabs (single-window-page.html
+# titles each page uniquely).
 #
 # Scenarios 1-9 run with permanent private browsing on (FIREFOX_PRIVATE_BROWSING=true,
 # whatever .env sets), scenario 10 with it off (false, the default).
@@ -57,9 +58,12 @@
 # after the tone stops.
 #
 # Scenario 10 checks private browsing off: the indicator is not shown, the
-# cookie and history are kept across a restart on the same /config, Firefox
-# still stays one window (a private window, which can't share it, is closed),
-# and a .torrent link still downloads into /config/downloads.
+# cookie and history are kept across a restart on the same /config, private
+# windows open as in Firefox itself (Ctrl+Shift+P, the File menu, "Open Link in
+# New Private Window") and really are private, Firefox keeps at most one normal
+# and one private window, both maximized, with each new window's or pop-up's tab
+# in the window of its kind, and a .torrent link still downloads into
+# /config/downloads.
 #
 # Scenario 11 checks that a FIREFOX_PRIVATE_BROWSING other than true or false
 # stops the container at start, with the reason in its log, before the image
@@ -441,13 +445,18 @@ check_point library-bottom-edge "$center_x" $((lib_y + lib_h + 1)) glyph:ns-resi
 check_drag library-title-drag none 1 "$center_x" $((lib_y - 10)) \
     $((center_x + 100)) $((lib_y + 90)) glyph:move
 
-# Prints the title of the page Firefox shows: its window title without the
-# " — Mozilla Firefox" suffix, or "" for a page without a title.
+# Prints the title of the page window WINDOW shows: its window title without
+# the " — Mozilla Firefox" suffix (" — Mozilla Firefox Private Browsing" in a
+# private window while private-only browsing is off), or "" for a page without
+# a title.
 shown_title() {
     local name
     name=$(in_x xdotool getwindowname "$WINDOW") || return 1
+    name=${name% — Mozilla Firefox Private Browsing}
     name=${name% — Mozilla Firefox}
-    [[ "$name" == "Mozilla Firefox" ]] && name=""
+    if [[ "$name" == "Mozilla Firefox" || "$name" == "Mozilla Firefox Private Browsing" ]]; then
+        name=""
+    fi
     printf '%s\n' "$name"
 }
 
@@ -540,52 +549,134 @@ check_tabs() {
     wait_title "${titles[n - 1]}" >/dev/null
 }
 
-# check_single_window LABEL TABS SHOWS ACTION...
-# Runs ACTION, then checks that Firefox still has exactly one browser window,
-# the original one, maximized at 0,0 over the whole display, that the
-# container is still running (closing Firefox's last window stops it), and
-# that the window has exactly the tabs TABS (see check_tabs). SHOWS is the
-# page ACTION must show in that window, which the check waits for, or "-" if
-# ACTION should change nothing: there is nothing to wait for then, so the
-# check gives a second window SETTLE_S to appear. A failed ACTION fails.
-check_single_window() {
-    local label=$1 tabs=$2 shows=$3 problem="" windows="" geometry="" deadline
-    shift 3
+# The private window, once one is open (scenario 10), or "".
+PWINDOW=""
+
+# in_window WIN COMMAND...: runs COMMAND with WINDOW set to WIN, after
+# activating WIN so that keys go to it; WINDOW is the same again afterwards.
+# Fails without running COMMAND if WIN is "" (no such window).
+in_window() {
+    local saved=$WINDOW status=0
+    [[ -n "$1" ]] || return 1
+    WINDOW=$1
+    shift
+    in_x xdotool windowactivate --sync "$WINDOW" >/dev/null 2>&1 || true
+    "$@" || status=$?
+    WINDOW=$saved
+    return "$status"
+}
+
+# Prints the window ids in $1 (space-separated) sorted, space-separated.
+sorted_ids() {
+    tr ' ' '\n' <<<"$1" | sed '/^$/d' | sort | paste -sd ' ' -
+}
+
+# Prints what is wrong with window WIN's size: it must be at 0,0 and cover the
+# display, and Openbox must have it maximized (_NET_WM_STATE); nothing if right.
+window_size_problem() {
+    local geometry state
+    geometry=$(in_x xdotool getwindowgeometry "$1" 2>/dev/null | tr -s ' ' | paste -sd ' ' -) || true
+    state=$(in_x obxprop --id "$1" 2>/dev/null | grep '^_NET_WM_STATE(ATOM)') || true
+    if [[ "$geometry" != *"Position: 0,0 "*"Geometry: $(display_size)"* ]] ||
+        [[ "$state" != *_NET_WM_STATE_MAXIMIZED_VERT* || "$state" != *_NET_WM_STATE_MAXIMIZED_HORZ* ]]; then
+        echo "window $1: $geometry; $state"
+    fi
+}
+
+# check_windows LABEL TABS PRIVATE_TABS WHERE SHOWS ACTION...
+# Runs ACTION, then checks that Firefox has exactly the browser windows it
+# should: the original one (WINDOW) and, unless PRIVATE_TABS is "-", one
+# private window (PWINDOW; the first check that expects it finds it, as the
+# window that is not WINDOW), no other. Each must be maximized at 0,0 over the
+# whole display; the private one's title must say it is private and WINDOW's
+# must not. The container must still be running (closing Firefox's last
+# window stops it). WINDOW must have exactly the tabs TABS and the private
+# window PRIVATE_TABS (see check_tabs). SHOWS is the page ACTION must show in
+# the WHERE ("normal" or "private") window, which the check waits for, or "-"
+# if ACTION should change nothing: there is nothing to wait for then, so the
+# check gives another window SETTLE_S to appear. A failed ACTION fails.
+check_windows() {
+    local label=$1 tabs=$2 private_tabs=$3 where=$4 shows=$5 problem="" want windows window
+    local deadline target title
+    shift 5
     checks=$((checks + 1))
     if ! "$@"; then
         problem="the action failed: $*"
+    fi
+    if [[ -z "$problem" && "$private_tabs" != - && -z "$PWINDOW" ]]; then
+        deadline=$((SECONDS + 15))
+        until PWINDOW=$(tr ' ' '\n' <<<"$(browser_windows || true)" | grep -vx "$WINDOW" | head -n 1) &&
+            [[ -n "$PWINDOW" ]] || ((SECONDS >= deadline)); do
+            sleep 0.2
+        done
+        [[ -n "$PWINDOW" ]] || problem="no second (private) window opened"
+    fi
+    want=$WINDOW
+    [[ "$private_tabs" == - ]] || want="$WINDOW $PWINDOW"
+    want=$(sorted_ids "$want")
+    target=$WINDOW
+    [[ "$where" == normal ]] || target=$PWINDOW
+    if [[ -n "$problem" ]]; then
+        :
     elif [[ "$shows" == - ]]; then
         sleep "$SETTLE_S"
-    elif ! wait_title "$(tab_prefix "$shows")" >/dev/null; then
-        problem="the window shows '$(shown_title)', not $shows"
+    elif ! in_window "$target" wait_title "$(tab_prefix "$shows")" >/dev/null; then
+        problem="the $where window shows '$(in_window "$target" shown_title)', not $shows"
     else
-        # A second window may still be closing after its tabs moved.
+        # A window may still be closing after its tabs moved.
         deadline=$((SECONDS + 15))
-        until [[ "$(browser_windows || true)" == "$WINDOW" ]] || ((SECONDS >= deadline)); do
+        until [[ "$(sorted_ids "$(browser_windows || true)")" == "$want" ]] ||
+            ((SECONDS >= deadline)); do
             sleep 0.2
         done
     fi
     if [[ -z "$problem" ]]; then
+        windows=$(sorted_ids "$(browser_windows || true)")
         if [[ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" != true ]]; then
             problem="the container stopped (Firefox exited)"
-        else
-            windows=$(browser_windows) || true
-            geometry=$(in_x xdotool getwindowgeometry "$WINDOW" 2>/dev/null |
-                tr -s ' ' | paste -sd ' ' -) || true
-            if [[ "$windows" != "$WINDOW" ||
-                "$geometry" != *"Position: 0,0 "*"Geometry: $(display_size)"* ]]; then
-                problem="windows: $windows main: $geometry"
-            elif ! problem=$(check_tabs "$tabs"); then
-                problem="tabs: $problem"
-            fi
+        elif [[ "$windows" != "$want" ]]; then
+            problem="windows: $windows (want $want)"
         fi
     fi
     if [[ -z "$problem" ]]; then
-        printf 'ok    %-22s tabs: %s\n' "$label" "$tabs"
+        for window in $want; do
+            problem+=$(window_size_problem "$window")
+        done
+    fi
+    if [[ -z "$problem" && "$private_tabs" != - ]]; then
+        title=$(in_x xdotool getwindowname "$PWINDOW" 2>/dev/null) || true
+        if [[ "$title" != *"Mozilla Firefox Private Browsing" ]]; then
+            problem="the second window is not private: '$title'"
+        elif [[ "$(in_x xdotool getwindowname "$WINDOW" 2>/dev/null || true)" == *"Private Browsing" ]]; then
+            problem="the first window is private"
+        fi
+    fi
+    if [[ -z "$problem" ]] && ! problem=$(in_window "$WINDOW" check_tabs "$tabs"); then
+        problem="tabs: $problem"
+    fi
+    if [[ -z "$problem" && "$private_tabs" != - ]] &&
+        ! problem=$(in_window "$PWINDOW" check_tabs "$private_tabs"); then
+        problem="private tabs: $problem"
+    fi
+    in_x xdotool windowactivate --sync "$WINDOW" >/dev/null 2>&1 || true
+    if [[ -z "$problem" ]]; then
+        if [[ "$private_tabs" == - ]]; then
+            printf 'ok    %-22s tabs: %s\n' "$label" "$tabs"
+        else
+            printf 'ok    %-22s tabs: %s | private: %s\n' "$label" "$tabs" "$private_tabs"
+        fi
     else
         printf 'FAIL  %-22s %s\n' "$label" "$problem"
         failures=$((failures + 1))
     fi
+}
+
+# check_single_window LABEL TABS SHOWS ACTION...: check_windows with no
+# private window: Firefox has exactly one browser window, WINDOW.
+check_single_window() {
+    local label=$1 tabs=$2 shows=$3
+    shift 3
+    check_windows "$label" "$tabs" - normal "$shows" "$@"
 }
 
 # Closes the shown tab with Ctrl+W and waits until each NAME in turn is shown
@@ -599,11 +690,10 @@ close_tabs() {
 }
 
 # Asks the running Firefox, as a second `firefox --private-window` would, for a
-# private window showing single-window-page.html#NAME. It stands in for every
-# way to open one (a menu item, a toolbar button, an extension): they all end
-# in the same new window. The command needs Firefox's own environment to reach
-# the running instance (its D-Bus session and runtime directory); it returns
-# once the request is handed over.
+# private window showing single-window-page.html#NAME, as a toolbar button or
+# an extension might. The command needs Firefox's own environment to reach the
+# running instance (its D-Bus session and runtime directory); it returns once
+# the request is handed over.
 open_private_window() {
     docker exec -u 1000:1000 -e DISPLAY=:0 -e HOME=/config \
         -e DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/dbus.base -e XDG_RUNTIME_DIR=/tmp/run/user/app \
@@ -613,31 +703,52 @@ open_private_window() {
         --private-window "file:///e2e/single-window-page.html#$1" >/dev/null 2>&1
 }
 
-# Firefox is a single window here: dropping a tab outside the tab strip must not
-# un-maximize the window or open a new one, new-window shortcuts must not open
-# one, links and pop-ups that ask for a new window must open as tabs in it
-# (config/firefox-autoconfig/single-window.cfg and the FF_PREF_* entries), and
-# the window-closing shortcuts must not close the only one. Ctrl+T, Ctrl+W and
-# a tab dragged along the tab strip are controls: they must change the tabs,
-# which shows the keys and drags reach Firefox.
+# open_then_load NAME XDOTOOL_ARGS...: runs xdotool with XDOTOOL_ARGS (keys
+# that open a new window or tab), then loads single-window-page.html#NAME in
+# the tab that shows, typed into the address bar, so the new tab has a name
+# (a new tab's own title is "" or "New Tab", depending on when it is read).
+open_then_load() {
+    local name=$1
+    shift
+    in_x xdotool "$@" || return 1
+    sleep 2
+    in_x xdotool key ctrl+l || return 1
+    in_x xdotool type --delay 5 "file:///e2e/single-window-page.html#$name" || return 1
+    in_x xdotool key Return
+}
+
+# Firefox keeps one window of each kind here, and with private-only browsing
+# every window is private, so there is one: dropping a tab outside the tab
+# strip must not un-maximize the window or open a new one, Ctrl+N must not open
+# one, Ctrl+Shift+P, links and pop-ups that ask for a new window must open as
+# tabs in it (config/firefox-autoconfig/single-window.cfg and the FF_PREF_*
+# entries), and the window-closing shortcuts must not close the only one.
+# Ctrl+T, Ctrl+W and a tab dragged along the tab strip are controls: they must
+# change the tabs, which shows the keys and drags reach Firefox.
 echo "== scenario 5: Firefox stays one maximized window"
 SETTLE_S=2
 start_firefox_windowed single-window-page.html "sw:main "
 in_x xdotool windowactivate --sync "$WINDOW"
 # The first tab's handle is at (100,20) and the second's at (420,20) at any
 # display size (tabs start at the left and have a fixed width). Tabs are
-# dropped into the right and left parts of the page. The page's top half is
-# a link and its bottom half a pop-up button.
+# dropped into the right and left parts of the page. The page is five bands,
+# each a fifth of its height (single-window-page.html); these are their middles.
 drop_right_x=$((DISPLAY_W * 3 / 4))
 drop_right_y=$((DISPLAY_H * 5 / 9))
 drop_left_x=$((DISPLAY_W / 8))
 drop_left_y=$((DISPLAY_H * 2 / 3))
-link_y=$((DISPLAY_H * 3 / 8))
-popup_y=$((DISPLAY_H * 7 / 8))
+link_y=$((DISPLAY_H * 1 / 10))
+popup_y=$((DISPLAY_H * 3 / 10))
+popup_plain_y=$((DISPLAY_H * 5 / 10))
+blank_y=$((DISPLAY_H * 7 / 10))
+context_link_y=$((DISPLAY_H * 9 / 10))
 check_single_window only-tab-dragged-down main - drag 100 20 "$drop_right_x" "$drop_right_y"
 check_single_window only-tab-dragged-left main - drag 100 20 "$drop_left_x" "$drop_left_y"
 check_single_window ctrl-n main - in_x xdotool key ctrl+n
-check_single_window ctrl-shift-p main - in_x xdotool key ctrl+shift+p
+# A new private window: private like every window here, so its tab moves in.
+check_single_window ctrl-shift-p "main ctrl-shift-p" ctrl-shift-p \
+    open_then_load ctrl-shift-p key ctrl+shift+p
+check_single_window ctrl-w-new-tab main main in_x xdotool key ctrl+w
 check_single_window ctrl-t "main untitled" untitled in_x xdotool key ctrl+t
 check_single_window ctrl-w main main in_x xdotool key ctrl+w
 # Opens a new window; single-window.cfg moves its tab into the first window.
@@ -646,17 +757,24 @@ check_single_window shift-click "main shift-click" shift-click \
 check_single_window tab-moved-along-strip "shift-click main" main drag 100 20 420 20
 check_single_window second-tab-torn-off "shift-click main" - \
     drag 100 20 "$drop_right_x" "$drop_right_y"
-# window.open() with a size asks for a 400x300 pop-up window.
+# Pop-ups: window.open() with a size asks for a 400x300 pop-up window, one
+# without features and a target="_blank" link for a new window or tab.
 check_single_window popup "shift-click main popup" popup \
     in_x xdotool mousemove "$((DISPLAY_W / 2))" "$popup_y" click 1
-# With private browsing on, every window is private: a private window's tab moves too.
-check_single_window private-window "shift-click main popup private" private \
+check_single_window popup-plain "shift-click main popup popup-plain" popup-plain \
+    in_x xdotool mousemove "$((DISPLAY_W / 2))" "$popup_plain_y" click 1
+check_single_window target-blank "shift-click main popup popup-plain blank" blank \
+    in_x xdotool mousemove "$((DISPLAY_W / 2))" "$blank_y" click 1
+# Another private window (here every window is private): its tab moves in too.
+check_single_window private-window "shift-click main popup popup-plain blank private" private \
     open_private_window private
 # These come last: a failure here closes Firefox and stops the container.
 # Closing the last tab must leave the window open with a new tab: that is
 # browser.tabs.closeWindowWithLastTab=false (FF_PREF_KEEP_WINDOW_WITH_LAST_TAB).
-check_single_window ctrl-shift-w "shift-click main popup private" - in_x xdotool key ctrl+shift+w
-check_single_window ctrl-w-every-tab untitled untitled close_tabs popup main shift-click untitled
+check_single_window ctrl-shift-w "shift-click main popup popup-plain blank private" - \
+    in_x xdotool key ctrl+shift+w
+check_single_window ctrl-w-every-tab untitled untitled \
+    close_tabs blank popup-plain popup main shift-click untitled
 
 # Counts the pixels within TOLERANCE of COLOR (RRGGBB) in the screen region
 # X Y W H, read over VNC; prints rfb_color_probe.py's JSON summary.
@@ -766,11 +884,12 @@ check_kept() {
 }
 
 # check_restart MODE KEPT VISITS: on a fresh /config ($WORK/profile-MODE), loads
-# cookie-page.html, which sets a cookie, restarts the container on the same
-# /config and loads it again. KEPT ("yes" or "no") is whether the cookie must
-# come back, and VISITS ("0" or "1 or more") what history must show after the
+# cookie-page.html, which sets the cookie e2e-main, restarts the container on
+# the same /config and loads it again. KEPT ("e2e-main" or "none") is the
+# cookies the page must find then, and VISITS ("0" or "1 or more") what history
+# must show after the
 # first run. Further arguments go to start_firefox_windowed. Leaves the second
-# container running.
+# container running, with the page's server.
 check_restart() {
     local mode=$1 kept=$2 visits=$3 profile=$WORK/profile-$1 title count
     shift 3
@@ -778,8 +897,8 @@ check_restart() {
     chmod 0777 "$profile" # the image takes /config over for its user
     start_firefox_windowed blank-page.html "e2e blank page" -v "$profile:/config" "$@"
     start_web_server "$E2E_DIR"
-    title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page earlier") || true
-    check_kept "$mode-first-visit" "e2e cookie page earlier-cookie=no" "$title"
+    title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page cookies") || true
+    check_kept "$mode-first-visit" "e2e cookie page cookies=none" "$title"
     stop_firefox
     count=$(cookie_page_visits "$profile")
     if [[ "$visits" != 0 && "$count" =~ ^[1-9][0-9]*$ ]]; then
@@ -788,8 +907,8 @@ check_restart() {
     check_kept "$mode-history" "$visits" "$count"
     start_firefox_windowed blank-page.html "e2e blank page" -v "$profile:/config" "$@"
     start_web_server "$E2E_DIR"
-    title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page earlier") || true
-    check_kept "$mode-cookie-restart" "e2e cookie page earlier-cookie=$kept" "$title"
+    title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page cookies") || true
+    check_kept "$mode-cookie-restart" "e2e cookie page cookies=$kept" "$title"
 }
 
 echo "== scenario 6: private browsing on: the indicator is shown, nothing is kept"
@@ -803,7 +922,7 @@ else
     failures=$((failures + 1))
 fi
 # Private browsing keeps cookies and history only until Firefox quits.
-check_restart on no 0
+check_restart on none 0
 
 # Firefox saves a .torrent link straight into /config/downloads, which
 # qBittorrent watches. The image's default prefs set browser.download.dir to
@@ -837,11 +956,11 @@ check_torrent_download() {
         sleep 0.5
     done
     listing=$(find "$dir" -mindepth 1 -maxdepth 1 -exec basename {} \; | sort | paste -sd ' ' -)
-    # Any visible window besides the browser window, except Firefox's pop-up panels
+    # Any visible window besides the browser windows, except Firefox's pop-up panels
     # (role "Popup", such as the first private download's "Files stay on your
     # device" notice), would be a prompt such as "Opening test.torrent".
     for window in $(in_x xdotool search --onlyvisible --name . 2>/dev/null || true); do
-        [[ "$window" != "$WINDOW" ]] || continue
+        [[ "$window" != "$WINDOW" && "$window" != "$PWINDOW" ]] || continue
         properties=$(in_x obxprop --id "$window")
         if ! grep -qxF 'WM_WINDOW_ROLE(STRING) = "Popup"' <<<"$properties"; then
             prompts+="\"$(in_x xdotool getwindowname "$window")\" "
@@ -1093,35 +1212,81 @@ check_indicator() {
 }
 
 # With private browsing off (FIREFOX_PRIVATE_BROWSING false or unset), Firefox
-# keeps history, cookies and site data in /config, as a normal profile. Its
-# window is not private, and a private window can't share it (Firefox does not
-# move tabs between private and normal windows), so single-window.cfg closes
-# any private window. Then each direction of a switch on an existing /config:
-# the image writes the pref again at every start, so it applies at once.
-echo "== scenario 10: private browsing off: no indicator, the profile is kept, one window"
+# keeps history, cookies and site data in /config, as a normal profile, and
+# opens private windows on request, as Firefox itself does. Firefox moves no
+# tab between a private and a normal window, so there can be one of each:
+# every new window's tabs, and every pop-up, must land in the window of their
+# kind, and both windows stay maximized. Then each direction of a switch on an
+# existing /config: the image writes the pref again at every start, so it
+# applies at once.
+echo "== scenario 10: private browsing off: profile kept, private windows on request"
 FIREFOX_ARGS=("${OFF_ARGS[@]}")
 mkdir -p "$WORK/downloads-off"
 chmod 0777 "$WORK/downloads-off"
-check_restart off yes "1 or more" -v "$WORK/downloads-off:/config/downloads"
+check_restart off e2e-main "1 or more" -v "$WORK/downloads-off:/config/downloads"
 check_prefs
 check_indicator no-private-indicator no
 load_url file:///e2e/single-window-page.html "sw:main " >/dev/null || true
-check_single_window off-ctrl-shift-p main - in_x xdotool key ctrl+shift+p
-check_single_window off-shift-click "main shift-click" shift-click \
+PWINDOW=""
+check_windows off-ctrl-shift-p main untitled private untitled in_x xdotool key ctrl+shift+p
+# Really private: each window has its own cookies. The normal window has
+# e2e-main from check_restart; the page sets e2e-<fragment>.
+title=$(in_window "$PWINDOW" load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html#private" \
+    "e2e cookie page cookies") || true
+check_kept off-private-cookies "e2e cookie page cookies=none" "$title"
+title=$(in_window "$WINDOW" load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html#main" \
+    "e2e cookie page cookies") || true
+check_kept off-normal-cookies "e2e cookie page cookies=e2e-main" "$title"
+in_window "$PWINDOW" load_url "file:///e2e/single-window-page.html#private" "sw:private " >/dev/null ||
+    true
+in_window "$WINDOW" load_url file:///e2e/single-window-page.html "sw:main " >/dev/null || true
+# File > New Private Window (Alt+F, then its access key W) from the normal window.
+check_windows off-file-menu main "private file-menu" private file-menu \
+    open_then_load file-menu key alt+f sleep 1 key w
+check_windows off-close-private-tab main private private private \
+    in_window "$PWINDOW" in_x xdotool key ctrl+w
+# The link's context menu: "Open Link in New Private Window" (access key P).
+check_windows off-link-private main "private context-link" private context-link \
+    in_x xdotool mousemove "$((DISPLAY_W / 2))" "$context_link_y" click 3 sleep 1 key p
+check_windows off-other-private main "private context-link other" private other \
+    open_private_window other
+check_windows off-ctrl-n main "private context-link other" normal - in_x xdotool key ctrl+n
+# Pop-ups and new windows from a page in the normal window.
+private_tabs="private context-link other"
+check_windows off-popup "main popup" "$private_tabs" normal popup \
+    in_x xdotool mousemove "$((DISPLAY_W / 2))" "$popup_y" click 1
+check_windows off-popup-plain "main popup popup-plain" "$private_tabs" normal popup-plain \
+    in_x xdotool mousemove "$((DISPLAY_W / 2))" "$popup_plain_y" click 1
+check_windows off-target-blank "main popup popup-plain blank" "$private_tabs" normal blank \
+    in_x xdotool mousemove "$((DISPLAY_W / 2))" "$blank_y" click 1
+normal_tabs="main popup popup-plain blank shift-click"
+check_windows off-shift-click "$normal_tabs" "$private_tabs" normal shift-click \
     in_x xdotool mousemove "$((DISPLAY_W / 2))" "$link_y" keydown shift click 1 keyup shift
-check_single_window off-private-window "main shift-click" - open_private_window private
+# The same from a page in the private window: the tabs are private.
+check_windows off-private-popup "$normal_tabs" "$private_tabs popup" private popup \
+    in_window "$PWINDOW" in_x xdotool mousemove "$((DISPLAY_W / 2))" "$popup_y" click 1
+check_windows off-private-popup-plain "$normal_tabs" "$private_tabs popup popup-plain" private \
+    popup-plain in_window "$PWINDOW" \
+    in_x xdotool mousemove "$((DISPLAY_W / 2))" "$popup_plain_y" click 1
+check_windows off-private-blank "$normal_tabs" "$private_tabs popup popup-plain blank" private \
+    blank in_window "$PWINDOW" in_x xdotool mousemove "$((DISPLAY_W / 2))" "$blank_y" click 1
+check_windows off-private-shift-click "$normal_tabs" \
+    "$private_tabs popup popup-plain blank shift-click" private shift-click \
+    in_window "$PWINDOW" \
+    in_x xdotool mousemove "$((DISPLAY_W / 2))" "$link_y" keydown shift click 1 keyup shift
 load_url file:///e2e/download-page.html "e2e download page" >/dev/null || true
 start_web_server "$WORK/web"
 check_torrent_download off-torrent-download "$WORK/downloads-off"
 stop_firefox
+PWINDOW=""
 # Off to on: the profile above, now private. A private session has its own
 # cookie jar, so the cookie the normal session kept does not show.
 FIREFOX_ARGS=("${SERVICE_ARGS[@]}")
 start_firefox_windowed blank-page.html "e2e blank page" -v "$WORK/profile-off:/config"
 check_indicator off-to-on-indicator yes
 start_web_server "$E2E_DIR"
-title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page earlier") || true
-check_kept off-to-on-cookie "e2e cookie page earlier-cookie=no" "$title"
+title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page cookies") || true
+check_kept off-to-on-cookie "e2e cookie page cookies=none" "$title"
 stop_firefox
 # On to off: scenario 6's profile, which had private browsing on at both starts.
 FIREFOX_ARGS=("${OFF_ARGS[@]}")
