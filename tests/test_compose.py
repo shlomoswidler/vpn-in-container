@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 ENV_FILE = REPO_ROOT / ".env.example"
 GENERATOR = REPO_ROOT / "config" / "cursors" / "generate_native_theme.py"
-NOVNC_PATCH = REPO_ROOT / "tests" / "novnc_patch.py"
+IMAGE_OVERLAYS = REPO_ROOT / "tests" / "image_overlays.py"
 PROXY_TEMPLATE = REPO_ROOT / "config" / "autoheal-proxy" / "haproxy.cfg"
 
 # name:tag@sha256:<digest>. The name may include a registry host and port; the tag is the
@@ -218,9 +218,9 @@ def generator_nominal_size() -> int:
     return module.NOMINAL_SIZE
 
 
-def novnc_overlays() -> tuple:
-    """The patched noVNC files tests/novnc_patch.py checks against the image's."""
-    spec = importlib.util.spec_from_file_location("novnc_patch", NOVNC_PATCH)
+def image_overlays() -> tuple:
+    """The patched image files tests/image_overlays.py checks against the image's."""
+    spec = importlib.util.spec_from_file_location("image_overlays", IMAGE_OVERLAYS)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.OVERLAYS
@@ -701,23 +701,41 @@ class ComposeTests(unittest.TestCase):
         # and the web UI hides its audio controls, so pages play without sound.
         self.assertEqual(self.services["firefox"].get("environment", {}).get("WEB_AUDIO"), "1")
 
-    def test_firefox_mounts_each_patched_novnc_file_read_only(self):
-        # Each file tests/novnc_patch.py checks against the image's is mounted over that file,
-        # and no other file is mounted over the image's noVNC client: an overlay without the
-        # check, or a check of a file nothing mounts, fails here.
-        novnc = {
+    def test_firefox_is_restarted_in_place_when_it_exits(self):
+        # The image's default is 0: Firefox exiting (quitting, closing its last window, a crash)
+        # stops the container. 1 starts Firefox again in the running container.
+        environment = self.services["firefox"].get("environment", {})
+        self.assertEqual(environment.get("KEEP_APP_RUNNING"), "1")
+
+    def test_firefox_mounts_each_patched_image_file_read_only(self):
+        # Each file tests/image_overlays.py checks against the image's is mounted over that
+        # file, and no other file is mounted over the image's noVNC client or its services
+        # (/etc/services.d): an overlay without the check, or a check of a file nothing
+        # mounts, fails here.
+        mounted = {
             volume["target"]: volume
             for volume in self.services["firefox"].get("volumes", [])
-            if volume.get("target", "").startswith("/opt/noVNC/")
+            if volume.get("target", "").startswith(("/opt/noVNC/", "/etc/services.d/"))
         }
-        overlays = {f"/opt/noVNC/{overlay.image_path}": overlay for overlay in novnc_overlays()}
+        overlays = {overlay.target: overlay for overlay in image_overlays()}
         # Files of the repo's own, not overlays of the image's: nothing to check them against.
         own = {"/opt/noVNC/core/util/cursor-keyword.js", "/opt/noVNC/core/util/core-glyphs.js"}
-        self.assertEqual(set(novnc), set(overlays) | own)
+        self.assertEqual(set(mounted), set(overlays) | own)
         for target, overlay in overlays.items():
             with self.subTest(target=target):
-                self.assertEqual(novnc[target]["source"], str(overlay.path))
-                self.assertIs(novnc[target].get("read_only"), True)
+                self.assertEqual(mounted[target]["source"], str(overlay.path))
+                self.assertIs(mounted[target].get("read_only"), True)
+
+    def test_firefox_mounts_the_shutdown_script_overlay_read_only(self):
+        # The image's /etc/services.d/app/kill presses Ctrl+Q when the container stops, which
+        # asks for confirmation here; the overlay presses Ctrl+Alt+Shift+Q instead.
+        kill = next(
+            volume
+            for volume in self.services["firefox"].get("volumes", [])
+            if volume.get("target") == "/etc/services.d/app/kill"
+        )
+        self.assertEqual(kill["source"], str(REPO_ROOT / "config" / "firefox-services" / "kill"))
+        self.assertIs(kill.get("read_only"), True)
 
     def test_firefox_cursor_size_matches_the_theme(self):
         size = self.services["firefox"].get("environment", {}).get("XCURSOR_SIZE")

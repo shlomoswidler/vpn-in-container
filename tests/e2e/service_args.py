@@ -3,8 +3,9 @@
 into the image name (first line) and `docker run` arguments (one per line)
 that reproduce its browser setup: the XCURSOR_*, display, WEB_AUDIO and FF_PREF_*
 environment variables, and the read-only mounts under the cursor-related
-directories, the Firefox profile (userChrome.css, customKeys.json) and the
-Firefox install directory (autoconfig). It also carries the service's security
+directories, the Firefox profile (userChrome.css, customKeys.json), the
+Firefox install directory (autoconfig) and the image's services (the shutdown
+script, /etc/services.d/app/kill). It also carries the service's security
 options, capabilities, read-only root and limits (tests/run_args.py), so the
 test runs Firefox as hardened as the service.
 """
@@ -23,12 +24,14 @@ ENV_KEYS = (
     "DISPLAY_HEIGHT",
     "DARK_MODE",
     "WEB_AUDIO",
+    "KEEP_APP_RUNNING",
 )
 FF_PREF_PREFIX = "FF_PREF_"
 MOUNT_PREFIXES = (
     "/usr/share/icons/",
     "/opt/noVNC/",
     "/etc/cont-init.d/",
+    "/etc/services.d/",
     "/config/profile/chrome/",
     "/config/profile/customKeys.json",
     "/usr/lib/firefox/",

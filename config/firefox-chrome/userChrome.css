@@ -9,11 +9,11 @@
 
 /* Firefox keeps one window of each kind, normal and private, here (see
    config/firefox-autoconfig/): hide the menu items that would open a second
-   normal window or quit (which stops the container). The private-window items
-   stay, as in Firefox itself: a new private window's tabs join the private
-   window if one is open. File > Close Window stays: single-window.cfg disables
-   it on the last window. Ctrl+Q still quits: the image's app shutdown script
-   sends it. */
+   normal window, and Firefox's own Quit items: single-window.cfg puts Quit &
+   Restart, which asks first, in their place. The private-window items stay, as
+   in Firefox itself: a new private window's tabs join the private window if one
+   is open. File > Close Window stays (single-window.cfg hides it with permanent
+   private browsing, where there is only one window). */
 #appMenu-new-window-button2,
 #menu_newNavigator,
 #context_openTabInWindow,

@@ -42,6 +42,7 @@ class ServiceArgsTests(unittest.TestCase):
             environment={
                 "XCURSOR_SIZE": "24",
                 "WEB_AUDIO": "1",
+                "KEEP_APP_RUNNING": "1",
                 "FF_PREF_B": "b.pref=1",
                 "FF_PREF_A": "a.pref=true",
                 "WEB_AUTHENTICATION": "0",
@@ -49,7 +50,13 @@ class ServiceArgsTests(unittest.TestCase):
         )
         self.assertEqual(
             option_values(args, "-e"),
-            ["XCURSOR_SIZE=24", "WEB_AUDIO=1", "FF_PREF_A=a.pref=true", "FF_PREF_B=b.pref=1"],
+            [
+                "XCURSOR_SIZE=24",
+                "WEB_AUDIO=1",
+                "KEEP_APP_RUNNING=1",
+                "FF_PREF_A=a.pref=true",
+                "FF_PREF_B=b.pref=1",
+            ],
         )
 
     def test_only_read_only_mounts_under_the_browser_directories_pass_through(self):
@@ -57,13 +64,19 @@ class ServiceArgsTests(unittest.TestCase):
             volumes=[
                 {"source": "/r/cursors", "target": "/usr/share/icons/x", "read_only": True},
                 {"source": "/r/init.sh", "target": "/etc/cont-init.d/57.sh", "read_only": True},
+                {"source": "/r/kill", "target": "/etc/services.d/app/kill", "read_only": True},
+                {"source": "/r/run", "target": "/etc/services.d/app/run"},
                 {"source": "/r/config", "target": "/config"},
                 {"source": "/r/other", "target": "/srv/other", "read_only": True},
             ]
         )
         self.assertEqual(
             option_values(args, "-v"),
-            ["/r/cursors:/usr/share/icons/x:ro", "/r/init.sh:/etc/cont-init.d/57.sh:ro"],
+            [
+                "/r/cursors:/usr/share/icons/x:ro",
+                "/r/init.sh:/etc/cont-init.d/57.sh:ro",
+                "/r/kill:/etc/services.d/app/kill:ro",
+            ],
         )
 
     def test_capabilities_pass_through(self):

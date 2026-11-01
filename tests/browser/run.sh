@@ -83,14 +83,17 @@ for file in pcm-player.min.js unmute.min.js; do
     docker cp -q "$CONTAINER:/opt/noVNC/app/$file" "$WORK/site/app/"
 done
 # The overlay below replaces the image's cursor.js, and the firefox service also mounts
-# config/novnc/ui.js over the image's app/ui.js (the throwaway container below gets that
-# mount too), which would hide any change a new image made to them: first check that the
-# image's files are still the ones config/novnc/cursor.js.patch and ui.js.patch were made
-# from, and that each overlay is its file plus its patch (config/cursors/README.md).
-mkdir -p "$WORK/image-novnc/core/util" "$WORK/image-novnc/app"
-cp "$WORK/site/core/util/cursor.js" "$WORK/image-novnc/core/util/"
-docker cp -q "$CONTAINER:/opt/noVNC/app/ui.js" "$WORK/image-novnc/app/"
-python3 -I "$REPO/tests/novnc_patch.py" "$WORK/image-novnc"
+# config/novnc/ui.js over the image's app/ui.js and config/firefox-services/kill over its
+# /etc/services.d/app/kill (the throwaway containers below get those mounts too), which would
+# hide any change a new image made to them: first check that the image's files (the ones
+# tests/image_overlays.py lists) are still the ones each NAME.patch was made from, and that
+# each overlay is its file plus its patch (config/cursors/README.md).
+OVERLAID=$(python3 -I "$REPO/tests/image_overlays.py" --paths)
+while IFS= read -r path; do
+    mkdir -p "$WORK/image-root$(dirname "$path")"
+    docker cp -q "$CONTAINER:$path" "$WORK/image-root$path"
+done <<<"$OVERLAID"
+python3 -I "$REPO/tests/image_overlays.py" "$WORK/image-root"
 for file in cursor.js cursor-keyword.js core-glyphs.js; do
     cp "$REPO/config/novnc/$file" "$WORK/site/core/util/$file"
 done
