@@ -1,0 +1,28 @@
+--- a/kill
++++ b/kill
+@@ -2,7 +2,9 @@
+ #
+ # Firefox doesn't gracefully shutdown when receiving SIGTERM.  For example, last
+ # opened tabs may not be saved.  Instead, terminate Firefox by sending the
+-# CTRL+q key presses.
++# CTRL+ALT+SHIFT+q key presses.  Here CTRL+q asks for confirmation before
++# quitting, which would leave Firefox running; CTRL+ALT+SHIFT+q quits without
++# asking (see config/firefox-autoconfig/single-window.cfg).
+ #
+ 
+ set -e # Exit immediately if a command exits with a non-zero status.
+@@ -10,11 +12,11 @@
+ 
+ xdotool key "Escape"
+ sleep 0.5
+-xdotool key "ctrl+q"
++xdotool key "ctrl+alt+shift+q"
+ 
+-for i in $(seq 1 10)
++for _ in $(seq 1 10)
+ do
+-    if ! ps | grep "/usr/lib/firefox/firefox" | grep -q -v grep
++    if ! pgrep -f "/usr/lib/firefox/firefox" > /dev/null
+     then
+         break
+     fi

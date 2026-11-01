@@ -80,58 +80,72 @@ tests/e2e/run.sh       # real Firefox + VNC server: markers, prefs, Openbox drag
 tests/browser/run.sh   # the image's noVNC with the patch, in headless Chrome and Firefox
 ```
 
-### The patched noVNC files: cursor.js and ui.js
+### The patched image files: cursor.js, ui.js and kill
 
-The firefox service mounts two patched files over the image's noVNC:
-`config/novnc/cursor.js` over `/opt/noVNC/core/util/cursor.js` (native cursors),
-and `config/novnc/ui.js` over `/opt/noVNC/app/ui.js` (the web UI: sound comes
-back on after the tab reconnects, see the main README's Sound section). Each
-would hide whatever a new image changed in that file. For each, three files
-record how the overlay was made:
+The firefox service mounts three patched files ("overlays") over the image's
+own: `config/novnc/cursor.js` over `/opt/noVNC/core/util/cursor.js` (native
+cursors), `config/novnc/ui.js` over `/opt/noVNC/app/ui.js` (the web UI: sound
+comes back on after the tab reconnects, see the main README's Sound section),
+and `config/firefox-services/kill` over `/etc/services.d/app/kill` (the script
+that quits Firefox when the container stops). Each would hide whatever a new
+image changed in that file. For each, three files in the overlay's directory
+(`config/novnc` or `config/firefox-services`) record how the overlay was made:
 
-- `config/novnc/NAME.upstream.sha256`: the checksum of the image's file. For
+- `NAME.upstream.sha256`: the checksum of the image's file, with its path under
+  its image directory (`/opt/noVNC` or `/etc/services.d/app`). For
   `cursor.js`, noVNC v1.6.0's and v1.7.0's, unchanged; for `ui.js`, the base
-  image's (jlesage/docker-baseimage-gui) own web UI. jlesage/firefox v26.09.1
-  ships both.
-- `config/novnc/NAME.patch`: the change, as `diff -u` output. Neither removes
-  anything. `cursor.js.patch` adds the `nativeCursorKeyword` import from
-  `cursor-keyword.js` and the keyword check at the top of `Cursor.change()`.
-  `ui.js.patch` adds, in `connectFinished()`, an `else` branch to the
-  first-interaction audio check: once the first interaction is handled, a
-  reconnect calls `UI.updateAudioVolume()`, which turns audio back on unless the
-  volume slider is at 0 (muted). `disconnectFinished()` turns audio off but
-  leaves the slider and the saved `audio_enabled` setting as they were.
-- `config/novnc/NAME`: the image's file plus the patch.
+  image's (jlesage/docker-baseimage-gui) own web UI; for `kill`,
+  jlesage/firefox's own. jlesage/firefox v26.09.1 ships all three.
+- `NAME.patch`: the change, as `diff -u` output. `cursor.js.patch` adds the
+  `nativeCursorKeyword` import from `cursor-keyword.js` and the keyword check at
+  the top of `Cursor.change()`. `ui.js.patch` adds, in `connectFinished()`, an
+  `else` branch to the first-interaction audio check: once the first
+  interaction is handled, a reconnect calls `UI.updateAudioVolume()`, which
+  turns audio back on unless the volume slider is at 0 (muted).
+  `disconnectFinished()` turns audio off but leaves the slider and the saved
+  `audio_enabled` setting as they were. Neither of those removes anything.
+  `kill.patch` changes only the key the script presses after Escape, and the
+  comment that names it: the image's script presses Ctrl+Q, which asks for
+  confirmation here (`config/firefox-autoconfig/single-window.cfg`), so on
+  `docker stop` the dialog would stay up and Firefox would not quit by itself
+  (the script waits 5 seconds for it); the overlay presses Ctrl+Alt+Shift+Q,
+  which quits without asking.
+- `NAME`: the image's file plus the patch. `kill` must stay executable
+  (mode 0755; a unit test checks this).
 
-`tests/browser/run.sh` and `tests/e2e/run.sh` copy the image's own files out of
-a container that is never started (no mount covers them) and stop with a `FAIL`
+`tests/browser/run.sh` and `tests/e2e/run.sh` copy the image's own files (at
+the paths `python3 -I tests/image_overlays.py --paths` prints) out of a
+container that is never started (no mount covers them) and stop with a `FAIL`
 line if a checksum is not the recorded one, or if a patch does not turn its
-file into the overlay exactly (`tests/novnc_patch.py`). The unit tests check the
-second part without the image: taking each patch back out of its overlay must
-give a file with the recorded checksum. So neither overlay can be edited
+file into the overlay exactly (`tests/image_overlays.py`). The unit tests check
+the second part without the image: taking each patch back out of its overlay
+must give a file with the recorded checksum. So no overlay can be edited
 without updating its patch.
 
 If a new image's file changed, re-apply the patch to it, review the result, and
 record the new file. From the repository root, after changing the image in
-`docker-compose.yml`, with `name=cursor.js path=core/util/cursor.js` or
-`name=ui.js path=app/ui.js`:
+`docker-compose.yml`, with
+`repo=config/novnc image_dir=/opt/noVNC name=cursor.js path=core/util/cursor.js`,
+`repo=config/novnc image_dir=/opt/noVNC name=ui.js path=app/ui.js` or
+`repo=config/firefox-services image_dir=/etc/services.d/app name=kill path=kill`:
 
 ```bash
 IMAGE=$(docker compose config --format json | python3 -I -c \
     'import json, sys; print(json.load(sys.stdin)["services"]["firefox"]["image"])')
 dir=$(mktemp -d)
 container=$(docker create "$IMAGE")
-docker cp "$container:/opt/noVNC/$path" "$dir/$name"
+docker cp "$container:$image_dir/$path" "$dir/$name"
 docker rm "$container"
 # What upstream changed: the old file is the overlay with the patch taken back out.
-patch -R -s -o "$dir/old-$name" "config/novnc/$name" "config/novnc/$name.patch"
+patch -R -s -o "$dir/old-$name" "$repo/$name" "$repo/$name.patch"
 diff -u "$dir/old-$name" "$dir/$name"
-patch -o "config/novnc/$name" "$dir/$name" "config/novnc/$name.patch"
-# Resolve any rejected hunk by hand in config/novnc/$name, then record both files:
+patch -o "$repo/$name" "$dir/$name" "$repo/$name.patch"
+# Resolve any rejected hunk by hand in $repo/$name, then record both files:
 diff -u --label "a/$path" --label "b/$path" \
-    "$dir/$name" "config/novnc/$name" > "config/novnc/$name.patch"
+    "$dir/$name" "$repo/$name" > "$repo/$name.patch"
 printf '%s  %s\n' "$(shasum -a 256 < "$dir/$name" | cut -d' ' -f1)" "$path" \
-    > "config/novnc/$name.upstream.sha256"
+    > "$repo/$name.upstream.sha256"
+if [ "$name" = kill ]; then chmod 0755 "$repo/$name"; fi
 python3 -m unittest discover -s tests && tests/browser/run.sh && tests/e2e/run.sh
 ```
 

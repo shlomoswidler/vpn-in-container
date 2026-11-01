@@ -167,23 +167,36 @@ docker compose stop
   - Private windows open as in Firefox itself: Ctrl+Shift+P, "New private window" in the app
     menu and the File menu, "Open Link in New Private Window". When a private window is already
     open, a new one's tabs join it.
-  - **Switching windows:** a window covers the other (both are full size). Press **Ctrl+`**
-    (Control and the key left of 1; on a Mac too, Control, not Command) to show the other
-    window, or use the **Window** menu in the menu bar and choose a window (they are numbered:
-    Alt+W, then 1 or 2). The menu bar shows while Alt is held, or always after right-clicking the
-    tab strip and choosing Menu Bar. Firefox has no Window menu of its own on Linux;
-    `config/firefox-autoconfig/single-window.cfg` adds it. Right after a window opens, give it a
-    second: a switch within a fraction of a second of it showing can be lost. (Ctrl+` is tested
-    through the web UI in headless Chrome and Firefox; the Alt keys were tested inside the
-    container, not from a Mac keyboard, where Option may not arrive as Alt.)
-  - **Closing a window:** Ctrl+Shift+W, File > Close Window or Window > Close Window close the
-    window shown while another one is open, for example the private window, which takes you
-    back to the normal one. On the last window they are greyed out and do nothing: closing it
-    would stop the container.
+  - **Switching windows** (private browsing off): a window covers the other (both are full
+    size). Press **Ctrl+`** (Control and the key left of 1; on a Mac too, Control, not Command)
+    to show the other window, or use the **Window** menu in the menu bar and choose a window
+    (they are numbered: Alt+W, then 1 or 2). The menu bar shows while Alt is held, or always
+    after right-clicking the tab strip and choosing Menu Bar. Firefox has no Window menu of its
+    own on Linux; `config/firefox-autoconfig/single-window.cfg` adds it. Right after a window
+    opens, give it a second: a switch within a fraction of a second of it showing can be lost.
+    (Ctrl+` is tested through the web UI in headless Chrome and Firefox; the Alt keys were
+    tested inside the container, not from a Mac keyboard, where Option may not arrive as Alt.)
+  - **Closing a window** (private browsing off): Ctrl+Shift+W, File > Close Window or Window >
+    Close Window close the window shown, for example the private window, which takes you back
+    to the normal one. Closing the last window quits Firefox, and it starts again with a fresh
+    normal window (see Quit & Restart below; nothing is reopened).
+  - **With private browsing on there is only one window,** since every window is private: no
+    Window menu, no Ctrl+`, and no Close Window (the menu item is hidden, Ctrl+Shift+W does
+    nothing).
+  - **Quit & Restart** (Ctrl+Q, File > Quit & Restart, or Quit & Restart at the bottom of the ☰
+    menu) asks first, then quits Firefox, and the container starts it again within about 20
+    seconds; the web UI stays connected. With private browsing on, that clears the session's
+    cookies, history and site data, without touching Docker. With it off, the tabs of the normal
+    window come back, as after Firefox's own restart; private windows do not.
+  - **Firefox never stops the container:** if Firefox exits for any reason (Quit & Restart,
+    closing its last window, a crash), the container starts it again
+    (`KEEP_APP_RUNNING=1`); only Docker stops the container. When it does (`docker stop`, `docker
+    compose down`), the image's shutdown script quits Firefox so it saves its profile; it presses
+    Ctrl+Alt+Shift+Q here, which quits without asking
+    (`config/firefox-services/kill`, the image's script with that key). Pressing that key
+    yourself is a Quit & Restart without the question.
   - Ctrl+N and Ctrl+Shift+N do nothing, and the menu items that open a normal window are hidden.
   - Closing the last tab opens a new tab; the window stays.
-  - Ctrl+Q still quits Firefox (the image's shutdown script relies on it); the
-    container then stops and restarts.
   - Settings: the single-window `FF_PREF_*` entries in `docker-compose.yml`,
     `config/firefox-autoconfig/`, `config/firefox-profile/customKeys.json` and
     `config/firefox-chrome/userChrome.css`.
@@ -198,8 +211,9 @@ FIREFOX_PRIVATE_BROWSING=true
 ```
 
 - **On (`true`):** Firefox always browses in private mode. History, cookies (and with them the
-  sites you are signed in to) and site data last only until Firefox restarts with the container,
-  so sites can't recognize you from one session to the next. The mask icon and "Private
+  sites you are signed in to) and site data last only until Firefox restarts (Quit & Restart,
+  Ctrl+Q, or the container restarting), so sites can't recognize you from one session to the
+  next. The mask icon and "Private
   browsing" label at the right end of the tab strip show it is on (Firefox only shows it when
   it really is).
 - **Off (unset, empty or `false`):** a normal Firefox profile. History, cookies, logins and site
@@ -699,11 +713,14 @@ vpn-in-container/
 │   ├── firefox-autoconfig/
 │   │   ├── autoconfig.js   # Loads single-window.cfg (Firefox autoconfig)
 │   │   └── single-window.cfg  # Moves a new window's tabs into the open window of its kind
-│   │                          # (normal or private); Window menu, Ctrl+`, Close Window
+│   │                          # (normal or private); Window menu, Ctrl+`, Quit & Restart
 │   ├── firefox-chrome/
-│   │   └── userChrome.css  # No toolbar window dragging; hides new/close window menu items
+│   │   └── userChrome.css  # No toolbar window dragging; hides new-window and Quit items
 │   ├── firefox-profile/
-│   │   └── customKeys.json # Clears the new-normal-window and reopen-window shortcuts
+│   │   └── customKeys.json # Clears the new-window, reopen-window and stock Quit shortcuts
+│   ├── firefox-services/
+│   │   ├── kill            # Patched shutdown script: quits Firefox with Ctrl+Alt+Shift+Q
+│   │   └── kill.patch, kill.upstream.sha256  # How kill differs from the image's
 │   ├── firefox-init.d/
 │   │   ├── 54-firefox-private-browsing.sh  # Refuses a FIREFOX_PRIVATE_BROWSING but true/false
 │   │   ├── 57-openbox-no-keepborder.sh  # Removes the 1px top border (unthemed cursor strip)
@@ -724,6 +741,7 @@ vpn-in-container/
 │   ├── cursor-keyword.test.mjs        # node --test tests/
 │   ├── test_generate_native_theme.py  # python3 -m unittest discover -s tests
 │   ├── test_make_core_glyph_table.py
+│   ├── image_overlays.py   # Checks each patched file is the image's file plus its patch
 │   ├── e2e/run.sh          # Real Firefox in throwaway containers: cursors, windows, sound (Docker)
 │   ├── stack/run.sh        # Running stack: VPN, kill switch, ports, qBittorrent, Autoheal
 │   ├── qbittorrent/download.sh  # Isolated real download test for the qBittorrent image

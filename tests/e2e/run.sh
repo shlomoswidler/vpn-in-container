@@ -24,13 +24,16 @@
 #
 # Scenario 5 checks that Firefox stays one maximized window: tab drags out of the
 # strip, new-window shortcuts, Ctrl+Shift+P, a Shift+clicked link, pop-ups
-# (window.open() with and without a size, a target="_blank" link), another
-# private window, the Window menu (one window listed), Ctrl+` and Close Window
-# (Ctrl+Shift+W, the File and Window menus), which do nothing on the last
-# window (config/firefox-autoconfig/,
+# (window.open() with and without a size, a target="_blank" link) and another
+# private window (config/firefox-autoconfig/,
 # config/firefox-profile/customKeys.json and the single-window FF_PREF_*
-# entries). After each, it checks the window's tabs (single-window-page.html
-# titles each page uniquely).
+# entries). With permanent private browsing there is one window: no Window
+# menu, Ctrl+` and Close Window (Ctrl+Shift+W, File menu) do nothing. After
+# each, it checks the window's tabs (single-window-page.html titles each page
+# uniquely). Then Quit & Restart: Ctrl+Q asks (Escape cancels), and Ctrl+Q, the
+# File menu and the main menu restart Firefox in the same container
+# (KEEP_APP_RUNNING=1), still private; so does the container's shutdown key,
+# Ctrl+Alt+Shift+Q, without asking.
 #
 # Scenarios 1-9 run with permanent private browsing on (FIREFOX_PRIVATE_BROWSING=true,
 # whatever .env sets), scenario 10 with it off (false, the default).
@@ -38,7 +41,9 @@
 # Scenario 6 checks that Firefox's "Private browsing" indicator shows in the tab
 # strip (userChrome.css shows it when permanent private browsing is on), and
 # that nothing is kept: a cookie and the history of a page are gone after the
-# container restarts on the same /config.
+# container restarts on the same /config, and a cookie is gone after Quit &
+# Restart. `docker stop` must quit Firefox through the shutdown script's key
+# within its 5 s, and the image must not start Firefox again then.
 #
 # Scenario 7 checks the Firefox half of the .torrent handoff to qBittorrent: a
 # .torrent link downloads, without a prompt, into the directory the firefox
@@ -66,8 +71,11 @@
 # and one private window, both maximized, with each new window's or pop-up's tab
 # in the window of its kind, Ctrl+` and the Window menu switch between the two
 # (the shown window is X's active window and the top of Openbox's stack), Close
-# Window (Ctrl+Shift+W, the Window menu) closes the private window but not the
-# last one, and a .torrent link still downloads into /config/downloads.
+# Window (Ctrl+Shift+W, the Window menu) closes the private window, Quit &
+# Restart reopens the normal window's tabs (not the private window's) and keeps
+# the cookie, closing the last window (normal, or private after the normal one
+# closed) restarts Firefox with a fresh normal window, a .torrent link still
+# downloads into /config/downloads, and `docker stop` quits Firefox cleanly.
 #
 # Scenario 11 checks that a FIREFOX_PRIVATE_BROWSING other than true or false
 # stops the container at start, with the reason in its log, before the image
@@ -84,9 +92,17 @@ CONTAINER="native-cursor-e2e-$$"
 # images in docker-compose.yml, so results can't change without a repo change.
 PROBE_IMAGE=python:3.13.18-alpine3.24@sha256:7984cf56ceaddebe4fefeb75d64000b9f45d8b77b11a09b24524da6cdc3af0c8
 WORK=$(mktemp -d)
+# The test containers have no network, and their resolver's server (Docker's
+# default for --network none) never answers, so each lookup Firefox makes waits
+# out musl's full timeout (5 s, measured). Shutting down, Firefox waits for
+# those lookups, and for its experiments sync, which waits on one: a quit could
+# take longer than the 5 s the image's shutdown script gives it. A loopback
+# server with nothing listening refuses at once, as a network that is down
+# would (docs/agents_output/debugging/shutdown-key-and-appmenu.md).
+NO_DNS_ARGS=(--dns 127.0.0.1 --dns-opt timeout:1 --dns-opt attempts:1)
 
 cleanup() {
-    docker rm -f "$CONTAINER-web" "$CONTAINER-stun" "$CONTAINER-novnc" "$CONTAINER-bad" \
+    docker rm -f "$CONTAINER-web" "$CONTAINER-stun" "$CONTAINER-overlays" "$CONTAINER-bad" \
         "$CONTAINER" >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
@@ -154,16 +170,19 @@ if [[ " ${SERVICE_ARGS[*]} " != *" $NATIVE_CSS_SOURCE:"* ]]; then
     exit 1
 fi
 
-# The firefox service mounts config/novnc/cursor.js and ui.js over the image's, which would hide
-# any change a new image made to them. The image's own files (from a container that is created,
-# never started, so no mount covers them) must still be the ones config/novnc/cursor.js.patch
-# and ui.js.patch were made from (config/cursors/README.md).
-docker create --name "$CONTAINER-novnc" "$IMAGE" >/dev/null
-mkdir -p "$WORK/image-novnc/core/util" "$WORK/image-novnc/app"
-docker cp -q "$CONTAINER-novnc:/opt/noVNC/core/util/cursor.js" "$WORK/image-novnc/core/util/"
-docker cp -q "$CONTAINER-novnc:/opt/noVNC/app/ui.js" "$WORK/image-novnc/app/"
-docker rm "$CONTAINER-novnc" >/dev/null
-python3 -I "$REPO/tests/novnc_patch.py" "$WORK/image-novnc"
+# The firefox service mounts patched copies of some of the image's files over them (the
+# overlays tests/image_overlays.py lists: config/novnc/cursor.js and ui.js, and
+# config/firefox-services/kill), which would hide any change a new image made to them. The
+# image's own files (from a container that is created, never started, so no mount covers them)
+# must still be the ones each NAME.patch was made from (config/cursors/README.md).
+docker create --name "$CONTAINER-overlays" "$IMAGE" >/dev/null
+OVERLAID=$(python3 -I "$REPO/tests/image_overlays.py" --paths)
+while IFS= read -r path; do
+    mkdir -p "$WORK/image-root$(dirname "$path")"
+    docker cp -q "$CONTAINER-overlays:$path" "$WORK/image-root$path"
+done <<<"$OVERLAID"
+docker rm "$CONTAINER-overlays" >/dev/null
+python3 -I "$REPO/tests/image_overlays.py" "$WORK/image-root"
 
 # The display size the firefox service asks for, as "WIDTHxHEIGHT".
 display_size() {
@@ -192,7 +211,8 @@ start_firefox() {
         args+=("${arg/#$NATIVE_CSS_SOURCE:/$theme_dir:}")
     done
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    docker run -d --rm --name "$CONTAINER" --network none --shm-size 1g \
+    docker run -d --rm --name "$CONTAINER" --network none "${NO_DNS_ARGS[@]}" \
+        --shm-size 1g \
         "${args[@]}" \
         -e FF_KIOSK=1 \
         -e FF_OPEN_URL=file:///e2e/cursor-page.html \
@@ -325,7 +345,8 @@ start_firefox_windowed() {
     local page=${1:-blank-page.html} title=${2:-e2e blank page}
     shift $(($# < 2 ? $# : 2))
     docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-    docker run -d --rm --name "$CONTAINER" --network none --shm-size 1g \
+    docker run -d --rm --name "$CONTAINER" --network none "${NO_DNS_ARGS[@]}" \
+        --shm-size 1g \
         "${FIREFOX_ARGS[@]}" "$@" \
         -e "FF_OPEN_URL=file:///e2e/$page" \
         -e FF_PREF_NO_DATA_BAR=datareporting.policy.dataSubmissionPolicyBypassNotification=true \
@@ -492,10 +513,12 @@ drag() {
 }
 
 # The title prefix of single-window-page.html's page NAME ("untitled" is a
-# page without a title, such as a new tab).
+# page without a title, such as a new tab; "e2e-blank" is blank-page.html).
 tab_prefix() {
     if [[ "$1" == untitled ]]; then
         echo ""
+    elif [[ "$1" == e2e-blank ]]; then
+        echo "e2e blank page"
     else
         echo "sw:$1 "
     fi
@@ -793,6 +816,167 @@ check_single_window() {
     check_windows "$label" "$tabs" - normal "$shows" "$@"
 }
 
+# Counts the pixels within TOLERANCE of COLOR (RRGGBB) in the screen region
+# X Y W H, read over VNC; prints rfb_color_probe.py's JSON summary.
+count_color() {
+    docker run --rm --network "container:$CONTAINER" \
+        -v "$E2E_DIR:/e2e:ro" "$PROBE_IMAGE" \
+        python -I /e2e/rfb_color_probe.py 127.0.0.1 5900 "$@"
+}
+
+# Firefox's own "Private browsing" indicator (userChrome.css shows it with
+# permanent private browsing) at the end of the tab strip. Its mask icon has a
+# fixed #8000D7 fill; measured on v26.09.1: about 90 such pixels in the 44px
+# strip, and none with private browsing off. Reads the strip until the icon
+# shows or 15 s pass (it may still be drawing), and sets INDICATOR to the last
+# summary and INDICATOR_PIXELS to its count.
+INDICATOR_MIN=50
+read_indicator() {
+    local deadline=$((SECONDS + 15))
+    while :; do
+        INDICATOR=$(count_color 0 0 "$DISPLAY_W" 44 8000d7 16)
+        INDICATOR_PIXELS=$(sed -n 's/.*"matches": \([0-9]*\).*/\1/p' <<<"$INDICATOR")
+        INDICATOR_PIXELS=${INDICATOR_PIXELS:-0}
+        if ((INDICATOR_PIXELS >= INDICATOR_MIN || SECONDS >= deadline)); then
+            return 0
+        fi
+        sleep 1
+    done
+}
+
+# Prints the process id of Firefox's main process (not a content process), or
+# nothing if Firefox is not running.
+firefox_pid() {
+    docker exec "$CONTAINER" ps -o pid,args 2>/dev/null |
+        awk '$2 == "/usr/lib/firefox/firefox" && !/-contentproc/ { print $1; exit }'
+}
+
+# Prints what the test container shows, for a failed check LABEL: Firefox's
+# processes, the visible windows with their names, and the end of Firefox's
+# own log. With E2E_ARTIFACTS set to a directory, also saves a screenshot
+# there as LABEL.png.
+failure_details() {
+    local window
+    echo "      Firefox processes: $(docker exec "$CONTAINER" ps -o pid,args 2>/dev/null |
+        awk '$2 == "/usr/lib/firefox/firefox" { print $1 (/-contentproc/ ? "c" : "") }' |
+        paste -sd ' ' -)"
+    for window in $(in_x xdotool search --onlyvisible --name . 2>/dev/null || true); do
+        echo "      window $window: $(in_x xdotool getwindowname "$window" 2>/dev/null || true)"
+    done
+    docker exec "$CONTAINER" tail -n 5 /config/log/firefox/error.log 2>/dev/null |
+        sed 's/^/      log: /' || true
+    if [[ -n "${E2E_ARTIFACTS:-}" ]]; then
+        mkdir -p "$E2E_ARTIFACTS"
+        docker run --rm --network "container:$CONTAINER" -v "$E2E_DIR:/e2e:ro" \
+            -v "$E2E_ARTIFACTS:/out" "$PROBE_IMAGE" python -I /e2e/rfb_color_probe.py \
+            127.0.0.1 5900 0 0 "$DISPLAY_W" "$DISPLAY_H" 000000 0 "/out/$1.png" >/dev/null ||
+            true
+    fi
+}
+
+# check_restarted LABEL KIND TABS ACTION...: runs ACTION, which must make
+# Firefox quit, and checks that the image starts it again in the same running
+# container (KEEP_APP_RUNNING=1): a new Firefox process within 60 s, with one
+# browser window, maximized, with exactly the tabs TABS (see check_tabs).
+# KIND "private": permanent private browsing, shown by the private browsing
+# indicator (a permanently private window's title does not say it is private);
+# "normal": a window whose title does not say it is private. WINDOW is the new
+# window afterwards, and there is no private window.
+check_restarted() {
+    local label=$1 kind=$2 tabs=$3 problem="" old_pid new_pid="" started windows title
+    local deadline start=$SECONDS
+    shift 3
+    checks=$((checks + 1))
+    old_pid=$(firefox_pid)
+    started=$(docker inspect -f '{{.State.StartedAt}}' "$CONTAINER")
+    if ! "$@"; then
+        problem="the action failed: $*"
+    else
+        deadline=$((SECONDS + 60))
+        while ((SECONDS < deadline)); do
+            new_pid=$(firefox_pid) || new_pid=""
+            windows=$(browser_windows || true)
+            if [[ -n "$new_pid" && "$new_pid" != "$old_pid" && -n "$windows" ]]; then
+                break
+            fi
+            sleep 0.5
+        done
+        if [[ -z "$new_pid" || "$new_pid" == "$old_pid" ]]; then
+            problem="Firefox (pid $old_pid) is not a new process: '$new_pid'"
+        elif [[ "$(docker inspect -f '{{.State.Running}} {{.State.StartedAt}}' "$CONTAINER" 2>/dev/null)" != "true $started" ]]; then
+            problem="the container stopped or restarted"
+        elif [[ "$windows" == *" "* || -z "$windows" ]]; then
+            problem="browser windows: '$windows' (want one)"
+        fi
+    fi
+    if [[ -z "$problem" ]]; then
+        WINDOW=$windows
+        PWINDOW=""
+        problem=$(window_size_problem "$WINDOW")
+    fi
+    if [[ -z "$problem" ]]; then
+        title=$(in_x xdotool getwindowname "$WINDOW" 2>/dev/null) || true
+        if [[ "$kind" == private ]]; then
+            read_indicator
+            if ((INDICATOR_PIXELS < INDICATOR_MIN)); then
+                problem="no private browsing indicator: $INDICATOR"
+            fi
+        elif [[ "$title" == *"Private Browsing" ]]; then
+            problem="the window is private: '$title'"
+        fi
+    fi
+    if [[ -z "$problem" ]] && ! problem=$(in_window "$WINDOW" check_tabs "$tabs"); then
+        problem="tabs: $problem"
+    fi
+    if [[ -z "$problem" ]]; then
+        printf 'ok    %-22s restarted in %s s (pid %s, was %s), tabs: %s\n' "$label" \
+            "$((SECONDS - start))" "$new_pid" "$old_pid" "$tabs"
+    else
+        printf 'FAIL  %-22s %s\n' "$label" "$problem"
+        failure_details "$label"
+        failures=$((failures + 1))
+    fi
+}
+
+# check_not_restarted LABEL TABS ACTION...: check_single_window with nothing
+# shown, and Firefox must still be the same process.
+check_not_restarted() {
+    local label=$1 tabs=$2 old_pid new_pid
+    shift 2
+    old_pid=$(firefox_pid)
+    check_single_window "$label" "$tabs" - "$@"
+    checks=$((checks + 1))
+    new_pid=$(firefox_pid)
+    if [[ -n "$old_pid" && "$new_pid" == "$old_pid" ]]; then
+        printf 'ok    %-22s Firefox still pid %s\n' "$label-same" "$old_pid"
+    else
+        printf 'FAIL  %-22s Firefox pid %s, was %s\n' "$label-same" "${new_pid:-(none)}" "$old_pid"
+        failures=$((failures + 1))
+    fi
+}
+
+# Opens Firefox's main menu (the ☰ button at the right end of the toolbar) and
+# chooses its last item, Quit & Restart (Up from the menu's start wraps to it),
+# then runs xdotool with any arguments given.
+appmenu_last_item() {
+    in_x xdotool mousemove "$((DISPLAY_W - 25))" 63 click 1 sleep 1.5 key Up sleep 0.5 key Return \
+        "$@"
+}
+
+# check_no_window_menu LABEL: Alt+W opens no menu (the Window menu's access
+# key); Escape twice leaves the menu bar if Alt activated it.
+check_no_window_menu() {
+    checks=$((checks + 1))
+    in_x xdotool key alt+w sleep 1
+    if menu_open; then
+        printf 'FAIL  %-22s Alt+W opened a menu\n' "$1"
+        failures=$((failures + 1))
+    else
+        printf 'ok    %-22s Alt+W opens no menu\n' "$1"
+    fi
+    in_x xdotool key Escape sleep 0.5 key Escape sleep 0.5
+}
+
 # Closes the shown tab with Ctrl+W and waits until each NAME in turn is shown
 # (one Ctrl+W per name).
 close_tabs() {
@@ -836,7 +1020,11 @@ open_then_load() {
 # strip must not un-maximize the window or open a new one, Ctrl+N must not open
 # one, Ctrl+Shift+P, links and pop-ups that ask for a new window must open as
 # tabs in it (config/firefox-autoconfig/single-window.cfg and the FF_PREF_*
-# entries), and the window-closing shortcuts must not close the only one.
+# entries). With only one window, there is no Window menu, no Ctrl+` and no
+# Close Window. Quit & Restart (Ctrl+Q, the File and main menus) asks first,
+# then Firefox quits and the image starts it again in the same container
+# (KEEP_APP_RUNNING=1); the container's shutdown key (Ctrl+Alt+Shift+Q, which
+# config/firefox-services/kill presses) quits without asking.
 # Ctrl+T, Ctrl+W and a tab dragged along the tab strip are controls: they must
 # change the tabs, which shows the keys and drags reach Firefox.
 echo "== scenario 5: Firefox stays one maximized window"
@@ -883,50 +1071,27 @@ check_single_window target-blank "shift-click main popup popup-plain blank" blan
 check_single_window private-window "shift-click main popup popup-plain blank private" private \
     open_private_window private
 sw_tabs="shift-click main popup popup-plain blank private"
-# The Window menu lists the one window, and Ctrl+` has no other window to show.
-check_window_menu window-menu-one 1
+# No Window menu, and Ctrl+` does nothing.
+check_no_window_menu no-window-menu
 check_single_window ctrl-grave "$sw_tabs" - in_x xdotool key ctrl+grave
-# These come last: a failure here closes Firefox and stops the container.
-# Close Window is disabled on the last window: Ctrl+Shift+W, File > Close Window
-# (access key D) and Window > Close Window (C) do nothing; Escape closes a menu
-# a disabled item leaves open.
-check_single_window ctrl-shift-w "$sw_tabs" - in_x xdotool key ctrl+shift+w
-check_single_window file-close-window "$sw_tabs" - \
+# No Close Window: Ctrl+Shift+W and File > Close Window (access key D) do
+# nothing; Escape closes a menu the missing item leaves open.
+check_not_restarted ctrl-shift-w "$sw_tabs" in_x xdotool key ctrl+shift+w
+check_not_restarted file-close-window "$sw_tabs" \
     in_x xdotool key alt+f sleep 1 key d sleep 1 key Escape sleep 0.5 key Escape
-check_single_window window-close-window "$sw_tabs" - \
-    in_x xdotool key alt+w sleep 1 key c sleep 1 key Escape sleep 0.5 key Escape
 # Closing the last tab must leave the window open with a new tab: that is
 # browser.tabs.closeWindowWithLastTab=false (FF_PREF_KEEP_WINDOW_WITH_LAST_TAB).
 check_single_window ctrl-w-every-tab untitled untitled \
     close_tabs blank popup-plain popup main shift-click untitled
-
-# Counts the pixels within TOLERANCE of COLOR (RRGGBB) in the screen region
-# X Y W H, read over VNC; prints rfb_color_probe.py's JSON summary.
-count_color() {
-    docker run --rm --network "container:$CONTAINER" \
-        -v "$E2E_DIR:/e2e:ro" "$PROBE_IMAGE" \
-        python -I /e2e/rfb_color_probe.py 127.0.0.1 5900 "$@"
-}
-
-# Firefox's own "Private browsing" indicator (userChrome.css shows it with
-# permanent private browsing) at the end of the tab strip. Its mask icon has a
-# fixed #8000D7 fill; measured on v26.09.1: about 90 such pixels in the 44px
-# strip, and none with private browsing off. Reads the strip until the icon
-# shows or 15 s pass (it may still be drawing), and sets INDICATOR to the last
-# summary and INDICATOR_PIXELS to its count.
-INDICATOR_MIN=50
-read_indicator() {
-    local deadline=$((SECONDS + 15))
-    while :; do
-        INDICATOR=$(count_color 0 0 "$DISPLAY_W" 44 8000d7 16)
-        INDICATOR_PIXELS=$(sed -n 's/.*"matches": \([0-9]*\).*/\1/p' <<<"$INDICATOR")
-        INDICATOR_PIXELS=${INDICATOR_PIXELS:-0}
-        if ((INDICATOR_PIXELS >= INDICATOR_MIN || SECONDS >= deadline)); then
-            return 0
-        fi
-        sleep 1
-    done
-}
+# Quit & Restart asks first: Escape answers Cancel, Return Quit & Restart. The
+# new Firefox opens FF_OPEN_URL's page (single-window-page.html) and nothing
+# else: a private session is not restored.
+check_not_restarted ctrl-q-cancel untitled in_x xdotool key ctrl+q sleep 1.5 key Escape
+check_restarted ctrl-q private main in_x xdotool key ctrl+q sleep 1.5 key Return
+check_restarted file-quit-restart private main \
+    in_x xdotool key alt+f sleep 1 key q sleep 1.5 key Return
+check_restarted appmenu-quit-restart private main appmenu_last_item sleep 1.5 key Return
+check_restarted shutdown-key private main in_x xdotool key ctrl+alt+shift+q
 
 # Serves the files in DIR on 127.0.0.1:WEB_PORT in the test container's network
 # namespace (torrent_server.py; the container still has no network), and waits
@@ -962,6 +1127,49 @@ stop_firefox() {
         fi
         sleep 0.5
     done
+}
+
+# check_clean_stop LABEL: stop_firefox, then checks the container's log of the
+# shutdown: Firefox quit by itself (status 0) within the 5 s the image's
+# shutdown script waits after pressing its key, so the key reached it and no
+# dialog held it up, and the image did not start Firefox again
+# (KEEP_APP_RUNNING=1 restarts it only while the container runs).
+check_clean_stop() {
+    local log=$WORK/stop.log follower result
+    checks=$((checks + 1))
+    docker logs -f -t "$CONTAINER" >"$log" 2>&1 &
+    follower=$!
+    stop_firefox
+    wait "$follower" || true
+    result=$(python3 -I -c '
+import re, sys
+from datetime import datetime
+lines = open(sys.argv[1], encoding="utf-8", errors="replace").read().splitlines()
+def when(line):
+    stamp = re.match(r"(\S+?)(\.\d+)?Z ", line)
+    fraction = (stamp.group(2) or ".0")[:7]
+    return datetime.fromisoformat(stamp.group(1) + fraction + "+00:00")
+start = next((i for i, l in enumerate(lines) if "SIGTERM received" in l), None)
+if start is None:
+    sys.exit("no shutdown in the log")
+after = lines[start:]
+stopping = next((l for l in after if "stopping service '"'"'app'"'"'" in l), None)
+exited = next((l for l in after if "service '"'"'app'"'"' exited" in l), None)
+if not stopping or not exited:
+    sys.exit("the log does not show Firefox stopping")
+if any("starting service '"'"'app'"'"'" in l for l in after):
+    sys.exit("Firefox was started again during the shutdown")
+seconds = (when(exited) - when(stopping)).total_seconds()
+status = exited.split("] ", 1)[1]
+if "(with status 0)" not in exited or seconds >= 5:
+    sys.exit(f"{status} after {seconds:.1f} s")
+print(f"{status} after {seconds:.1f} s")
+' "$log" 2>&1) && {
+        printf 'ok    %-22s %s\n' "$1" "$result"
+        return 0
+    }
+    printf 'FAIL  %-22s %s\n' "$1" "$result"
+    failures=$((failures + 1))
 }
 
 # Loads URL in the shown tab, typed into the address bar as a person would, and
@@ -1047,6 +1255,15 @@ else
 fi
 # Private browsing keeps cookies and history only until Firefox quits.
 check_restart on none 0
+# Quit & Restart quits Firefox, so it ends the private session without a
+# container restart: the cookie the page just set is there until then.
+load_url file:///e2e/blank-page.html "e2e blank page" >/dev/null || true
+title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page cookies") || true
+check_kept on-cookie-in-session "e2e cookie page cookies=e2e-main" "$title"
+check_restarted on-quit-restart private e2e-blank in_x xdotool key ctrl+q sleep 1.5 key Return
+title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page cookies") || true
+check_kept on-cookie-quit-restart "e2e cookie page cookies=none" "$title"
+check_clean_stop on-clean-stop
 
 # Firefox saves a .torrent link straight into /config/downloads, which
 # qBittorrent watches. The image's default prefs set browser.download.dir to
@@ -1409,18 +1626,45 @@ check_window_menu off-window-menu-two 2
 check_windows off-ctrl-shift-w-private "$normal_tabs" - normal - \
     close_window "$PWINDOW" key ctrl+shift+w
 PWINDOW=""
-check_single_window off-ctrl-shift-w-last "$normal_tabs" - in_x xdotool key ctrl+shift+w
 check_windows off-reopen-private "$normal_tabs" untitled private untitled \
     in_x xdotool key ctrl+shift+p
 check_windows off-window-menu-close "$normal_tabs" - normal - \
     close_window "$PWINDOW" key alt+w sleep 1 key c
 PWINDOW=""
-check_single_window off-window-menu-close-last "$normal_tabs" - \
-    in_x xdotool key alt+w sleep 1 key c sleep 1 key Escape sleep 0.5 key Escape
+# Quit & Restart asks first, then reopens the normal window's tabs, followed by
+# FF_OPEN_URL's page (blank-page.html); a private window is not reopened. The
+# profile is kept: the cookie too.
+check_windows off-reopen-private-2 "$normal_tabs" untitled private untitled \
+    in_x xdotool key ctrl+shift+p
+check_windows off-ctrl-q-cancel "$normal_tabs" untitled normal - \
+    in_x xdotool key ctrl+q sleep 1.5 key Escape
+restored_tabs="$normal_tabs e2e-blank"
+check_restarted off-ctrl-q normal "$restored_tabs" in_x xdotool key ctrl+q sleep 1.5 key Return
+title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page cookies") || true
+check_kept off-cookie-quit-restart "e2e cookie page cookies=e2e-main" "$title"
+# Closing the last window quits Firefox, and the image starts it again, with
+# only FF_OPEN_URL's page: Ctrl+Shift+W, Window > Close Window (access key C).
+check_restarted off-ctrl-shift-w-last normal e2e-blank in_x xdotool key ctrl+shift+w
+check_restarted off-window-menu-close-last normal e2e-blank in_x xdotool key alt+w sleep 1 key c
+# The last window is private (the normal one closed first): Firefox starts
+# again with a normal window, and the private session is over.
+check_windows off-private-before-last e2e-blank untitled private untitled \
+    in_x xdotool key ctrl+shift+p
+checks=$((checks + 1))
+if close_window "$WINDOW" key ctrl+shift+w &&
+    [[ "$(browser_windows || true)" == "$PWINDOW" ]]; then
+    printf 'ok    %-22s only the private window is left\n' off-close-normal-first
+else
+    printf 'FAIL  %-22s windows: %s (want only %s)\n' off-close-normal-first \
+        "$(browser_windows || true)" "$PWINDOW"
+    failure_details off-close-normal-first
+    failures=$((failures + 1))
+fi
+check_restarted off-close-last-private normal e2e-blank close_window "$PWINDOW" key ctrl+shift+w
 load_url file:///e2e/download-page.html "e2e download page" >/dev/null || true
 start_web_server "$WORK/web"
 check_torrent_download off-torrent-download "$WORK/downloads-off"
-stop_firefox
+check_clean_stop off-clean-stop
 PWINDOW=""
 # Off to on: the profile above, now private. A private session has its own
 # cookie jar, so the cookie the normal session kept does not show.

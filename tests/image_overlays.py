@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""Check that each patched noVNC file in config/novnc is the image's file plus its patch.
+"""Check that each overlay is the firefox image's file plus its patch.
 
-The firefox service mounts config/novnc/cursor.js over the image's
-/opt/noVNC/core/util/cursor.js, and config/novnc/ui.js over /opt/noVNC/app/ui.js, so a new
-image's version of either file would be hidden, with its fixes. For each, NAME.upstream.sha256
-records the checksum of the file the overlay was made from, and NAME.patch the change
-(`diff -u` output).
+The firefox service mounts patched copies of some of its image's files over the image's own
+("overlays"): config/novnc/cursor.js over /opt/noVNC/core/util/cursor.js, config/novnc/ui.js
+over /opt/noVNC/app/ui.js, and config/firefox-services/kill over /etc/services.d/app/kill. A new
+image's version of any of them would be hidden, with its fixes. For each overlay NAME, in its
+repo directory, NAME.upstream.sha256 records the checksum of the image file the overlay was made
+from, and NAME.patch the change (`diff -u` output).
 
-Given a directory with the image's files at their paths under /opt/noVNC (copied out of the
-image with `docker create` and `docker cp`), this exits 0 if each has the recorded checksum and
-its patch turns it into the overlay; otherwise it says which and exits 1. A patch is applied
-strictly: every hunk must match exactly where it says, with no offset and no fuzz (unlike
-`patch`). The unit tests (tests/test_novnc_patch.py) check the overlays without the image's
-files, by taking each patch back out of its overlay. config/cursors/README.md says how to
-update the three files of an overlay.
+Given IMAGE_ROOT, a directory holding the image's files at their absolute paths (for example
+IMAGE_ROOT/opt/noVNC/app/ui.js, copied out of the image with `docker create` and `docker cp`),
+this exits 0 if each has the recorded checksum and its patch turns it into the overlay;
+otherwise it says which and exits 1. A patch is applied strictly: every hunk must match exactly
+where it says, with no offset and no fuzz (unlike `patch`). With --paths, it prints the image
+path of each overlay, one per line, for the scripts that copy those files out of the image.
+The unit tests (tests/test_image_overlays.py) check the overlays without the image's files, by
+taking each patch back out of its overlay. config/cursors/README.md says how to update the
+three files of an overlay.
 
-Usage: python3 -I tests/novnc_patch.py IMAGE_NOVNC_DIR
+Usage: python3 -I tests/image_overlays.py IMAGE_ROOT
+       python3 -I tests/image_overlays.py --paths
 """
 
 import hashlib
@@ -25,7 +29,6 @@ from pathlib import Path
 from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-NOVNC_DIR = REPO_ROOT / "config" / "novnc"
 README = "config/cursors/README.md"
 HUNK_HEADER = re.compile(rb"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?\n\Z")
 
@@ -35,27 +38,39 @@ class PatchError(Exception):
 
 
 class Overlay(NamedTuple):
-    """A patched noVNC file: config/novnc/NAME, mounted over /opt/noVNC/IMAGE_PATH."""
+    """REPO_DIR/NAME (repo-relative), mounted over IMAGE_DIR/IMAGE_PATH in the image.
 
+    IMAGE_DIR is an absolute directory of the image; IMAGE_PATH is relative to it, and is the
+    path the checksum file and the patch's headers name.
+    """
+
+    repo_dir: str
     name: str
+    image_dir: str
     image_path: str
 
     @property
     def path(self) -> Path:
-        return NOVNC_DIR / self.name
+        return REPO_ROOT / self.repo_dir / self.name
 
     @property
     def patch_file(self) -> Path:
-        return NOVNC_DIR / f"{self.name}.patch"
+        return REPO_ROOT / self.repo_dir / f"{self.name}.patch"
 
     @property
     def checksum_file(self) -> Path:
-        return NOVNC_DIR / f"{self.name}.upstream.sha256"
+        return REPO_ROOT / self.repo_dir / f"{self.name}.upstream.sha256"
+
+    @property
+    def target(self) -> str:
+        """The image file's absolute path, which the overlay is mounted over."""
+        return f"{self.image_dir}/{self.image_path}"
 
 
 OVERLAYS = (
-    Overlay("cursor.js", "core/util/cursor.js"),
-    Overlay("ui.js", "app/ui.js"),
+    Overlay("config/novnc", "cursor.js", "/opt/noVNC", "core/util/cursor.js"),
+    Overlay("config/novnc", "ui.js", "/opt/noVNC", "app/ui.js"),
+    Overlay("config/firefox-services", "kill", "/etc/services.d/app", "kill"),
 )
 
 
@@ -165,7 +180,7 @@ def apply_patch(data: bytes, hunks: list[Hunk], reverse: bool = False) -> bytes:
 
 def recorded_sha256(overlay: Overlay) -> str:
     """The checksum in OVERLAY's checksum file; raise PatchError if it is not one such line."""
-    # One `sha256sum` line: the digest, two spaces, the file's path under /opt/noVNC.
+    # One `sha256sum` line: the digest, two spaces, the file's path under its image directory.
     pattern = re.compile(rf"\A([0-9a-f]{{64}})  {re.escape(overlay.image_path)}\n\Z")
     line = pattern.match(overlay.checksum_file.read_text())
     if not line:
@@ -190,29 +205,34 @@ def original_of(overlay: bytes, patch: bytes, sha256: str) -> bytes:
     return original
 
 
+def copied_path(image_root: Path, overlay: Overlay) -> Path:
+    """Where IMAGE_ROOT holds the image's file that OVERLAY is mounted over."""
+    return image_root / overlay.target.lstrip("/")
+
+
 def check_image_file(overlay: Overlay, image_file: Path) -> list[str]:
     """What is wrong with IMAGE_FILE (the image's file) and OVERLAY; [] if nothing."""
     try:
         original = image_file.read_bytes()
     except OSError as err:
-        return [f"cannot read the image's {overlay.image_path}: {err}"]
+        return [f"cannot read the image's {overlay.target}: {err}"]
     patch_file = overlay.patch_file.relative_to(REPO_ROOT)
     try:
         recorded = recorded_sha256(overlay)
         actual = hashlib.sha256(original).hexdigest()
         if actual != recorded:
             changed = (
-                f"the image's noVNC {overlay.image_path} changed (sha256 {actual}, recorded "
+                f"the image's {overlay.target} changed (sha256 {actual}, recorded "
                 f"{recorded} in {overlay.checksum_file.relative_to(REPO_ROOT)}): re-apply "
                 f"{patch_file} to it, as {README} says"
             )
             return [changed]
         patched = apply_patch(original, parse_patch(overlay.patch_file.read_bytes()))
     except (OSError, PatchError) as err:
-        return [f"{overlay.name}: {err}"]
+        return [f"{overlay.repo_dir}/{overlay.name}: {err}"]
     if patched != overlay.path.read_bytes():
         mismatch = (
-            f"{overlay.path.relative_to(REPO_ROOT)} is not the image's {overlay.image_path} "
+            f"{overlay.path.relative_to(REPO_ROOT)} is not the image's {overlay.target} "
             f"plus {patch_file}"
         )
         return [mismatch]
@@ -221,19 +241,23 @@ def check_image_file(overlay: Overlay, image_file: Path) -> list[str]:
 
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
-        print(f"usage: {argv[0]} IMAGE_NOVNC_DIR", file=sys.stderr)
+        print(f"usage: {argv[0]} IMAGE_ROOT | --paths", file=sys.stderr)
         return 2
-    image_dir = Path(argv[1])
+    if argv[1] == "--paths":
+        for overlay in OVERLAYS:
+            print(overlay.target)
+        return 0
+    image_root = Path(argv[1])
     failed = False
     for overlay in OVERLAYS:
-        problems = check_image_file(overlay, image_dir / overlay.image_path)
+        problems = check_image_file(overlay, copied_path(image_root, overlay))
         for problem in problems:
             print(f"FAIL  {problem}", file=sys.stderr)
         if problems:
             failed = True
             continue
         print(
-            f"ok    the image's noVNC {overlay.image_path} is the recorded one (sha256 "
+            f"ok    the image's {overlay.target} is the recorded one (sha256 "
             f"{recorded_sha256(overlay)}), and {overlay.path.relative_to(REPO_ROOT)} is it plus "
             f"{overlay.patch_file.relative_to(REPO_ROOT)}"
         )
