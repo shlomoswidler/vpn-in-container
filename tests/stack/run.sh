@@ -43,8 +43,15 @@
 #     an unlabeled one alone; its restart call waits for a restart that takes
 #     the whole stop timeout (the proxy logs 204, and Autoheal logs no failure)
 #
+# Three checks wait on another program's schedule: Autoheal's next pass and
+# its restart of a container that takes the whole stop timeout, qSticky's next
+# check of the listening port, and qBittorrent's scan of the watch folder.
+# Each is set going right after the health checks and checked at the end, so
+# its wait overlaps the other checks instead of adding to them.
+#
 # It changes nothing permanently: the listening port is restored by qSticky
-# (or by this script), and the test torrent and test containers are removed.
+# (or by this script), and the test torrent and test containers are removed,
+# also when a check fails or the script is interrupted.
 #
 # Usage: tests/stack/run.sh   (needs docker, python3 and curl on the host)
 
@@ -74,6 +81,7 @@ TEST_ID="stack-test-$$"
 failures=0
 checks=0
 restore_port=""
+port_restore=""
 watch_file=""
 test_hash=""
 
@@ -88,6 +96,8 @@ fail() {
 }
 
 cleanup() {
+    # A second Ctrl-C must not cut the port restore short.
+    trap '' INT TERM
     docker rm -f -v "$TEST_ID-labeled" "$TEST_ID-unlabeled" "$TEST_ID-proxy-target" \
         "$TEST_ID-created" >/dev/null 2>&1 || true
     if [[ -n "$watch_file" ]]; then
@@ -103,8 +113,11 @@ cleanup() {
     rm -rf "$WORK"
 }
 trap cleanup EXIT
+# An interrupt or a kill exits through the EXIT trap too, so the cleanup runs.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-docker compose -f "$REPO/docker-compose.yml" config --format json > "$WORK/config.json"
+docker compose -f "$REPO/docker-compose.yml" config --format json >"$WORK/config.json"
 
 # Prints a value from the resolved compose config: compose_value SERVICE KEY
 # where KEY is "container", "image", "env:<NAME>", "mount:<target>",
@@ -302,6 +315,205 @@ for container in "$VPN" "$QBT" "$QSTICKY" "$FIREFOX" "${AUTOHEAL:-autoheal}" \
         fail "$container is $status after waiting up to ${HEALTH_TIMEOUT}s"
     fi
 done
+
+echo "== Autoheal: test containers (checked at the end)"
+start_period=$(compose_value autoheal env:AUTOHEAL_START_PERIOD)
+interval=$(compose_value autoheal env:AUTOHEAL_INTERVAL)
+uptime=$(python3 -I -c '
+import datetime, sys
+started = datetime.datetime.fromisoformat(sys.argv[1][:26].rstrip("Z") + "+00:00")
+print(int((datetime.datetime.now(datetime.timezone.utc) - started).total_seconds()))' \
+    "$(docker inspect -f '{{.State.StartedAt}}' "$AUTOHEAL")")
+if ((uptime < ${start_period:-0} + ${interval:-5})); then
+    wait_for=$((${start_period:-0} + ${interval:-5} - uptime))
+    echo "      autoheal started ${uptime}s ago; waiting ${wait_for}s for its start period"
+    sleep "$wait_for"
+fi
+# Both fail their health check at once. Autoheal's next pass restarts the
+# labeled one, and that restart takes the whole stop timeout
+# (AUTOHEAL_DEFAULT_STOP_TIMEOUT, 30 s), so it runs while the checks below do;
+# the unlabeled one stays unhealthy all that time.
+for kind in labeled unlabeled; do
+    labels=()
+    [[ "$kind" == labeled ]] && labels=(--label autoheal=true)
+    docker run -d --name "$TEST_ID-$kind" --network none ${labels[@]+"${labels[@]}"} \
+        --health-cmd false --health-interval 2s --health-retries 1 --health-start-period 0s \
+        "$PLAIN_IMAGE" sleep 600 >/dev/null
+done
+labeled_start=$(docker inspect -f '{{.State.StartedAt}}' "$TEST_ID-labeled")
+unlabeled_start=$(docker inspect -f '{{.State.StartedAt}}' "$TEST_ID-unlabeled")
+restart_until=$((SECONDS + ${interval:-5} * 3 + 30))
+echo "      started $TEST_ID-labeled (label autoheal=true) and $TEST_ID-unlabeled, both failing their health check"
+
+echo "== qBittorrent: watch folder (checked at the end)"
+watch_dir=$(compose_value qbittorrent mount:/watch)
+test_hash=$(python3 -I "$STACK_DIR/torrent_file.py" "$WORK/test.torrent" "$TEST_ID")
+watch_file="$watch_dir/$TEST_ID.torrent"
+cp "$WORK/test.torrent" "$watch_file"
+added_until=$((SECONDS + 60))
+echo "      dropped $TEST_ID.torrent in the watch folder"
+
+echo "== port forwarding and qSticky"
+vpn_status=$(docker exec -e GLUETUN_API_KEY "$QBT" sh -c \
+    'curl -s --max-time 10 -H "X-API-Key: $GLUETUN_API_KEY" http://localhost:8000/v1/vpn/status' \
+    2>/dev/null | json_get status 2>/dev/null || true)
+if [[ "$vpn_status" == running ]]; then
+    pass "Gluetun control server reports the VPN running (API key accepted)"
+else
+    fail "Gluetun /v1/vpn/status: '$vpn_status'"
+fi
+# The control server must refuse requests without the right API key.
+for route in /v1/portforward /v1/vpn/status; do
+    for key in none wrong; do
+        header=""
+        [[ "$key" == wrong ]] && header="X-API-Key: wrong-$TEST_ID"
+        code=$(docker exec "$QBT" curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+            ${header:+-H "$header"} "http://localhost:8000$route" 2>/dev/null || true)
+        if [[ "$code" == 401 ]]; then
+            pass "Gluetun control server refuses $route with $key API key (401)"
+        else
+            fail "Gluetun control server answered $route with $key API key: HTTP $code"
+        fi
+    done
+done
+# qSticky's role allows only GET /v1/portforward and GET /v1/vpn/status: with
+# its valid key, other routes must be refused. Read-only routes only (never a
+# PUT, or the v0 GET restart routes). Gluetun answers 404 for a route it does
+# not have, before any role check, so the 401s are refusals of real routes.
+# Prints the HTTP status of a GET with qSticky's key: control_get ROUTE
+control_get() {
+    docker exec -e GLUETUN_API_KEY "$QBT" sh -c \
+        'curl -s -o /dev/null -w "%{http_code}" --max-time 10 -H "X-API-Key: $GLUETUN_API_KEY" "http://localhost:8000$1"' \
+        sh "$1" 2>/dev/null || true
+}
+code=$(control_get "/v1/$TEST_ID")
+if [[ "$code" == 404 ]]; then
+    pass "Gluetun control server answers a route it does not have with 404 (valid API key)"
+else
+    fail "Gluetun control server answered the unknown route /v1/$TEST_ID with HTTP $code (want 404)"
+fi
+for route in /v1/publicip/ip /v1/dns/status /v1/vpn/settings /v1/updater/status /v1/version; do
+    code=$(control_get "$route")
+    if [[ "$code" == 401 ]]; then
+        pass "Gluetun control server refuses $route, outside qSticky's role, with its valid API key (401)"
+    else
+        fail "Gluetun control server answered $route (outside qSticky's role) with its valid API key: HTTP $code"
+    fi
+done
+# Those roles come from the auth file Compose writes into the container from
+# .env's GLUETUN_API_KEY (configs: gluetun_auth): the path Gluetun's startup
+# summary names must be that file, and Gluetun must have read its one role.
+auth_file=$(compose_value vpn config-target:gluetun_auth)
+vpn_log=$(docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' "$VPN")" "$VPN" 2>&1 || true)
+auth_summary=$(sed -n 's/.*Authentication file path: //p' <<<"$vpn_log" | tail -n 1)
+if [[ -n "$auth_file" && "$auth_summary" == "$auth_file" ]] &&
+    grep -q 'read 1 roles from authentication file' <<<"$vpn_log"; then
+    pass "Gluetun read 1 role from $auth_file, the file Compose writes from GLUETUN_API_KEY"
+else
+    fail "Gluetun's auth file is '$auth_summary', Compose writes '$auth_file'; read 1 role: $(grep -c 'read 1 roles from authentication file' <<<"$vpn_log")"
+fi
+auth_file_mode=$(docker exec "$VPN" stat -c '%a %u:%g' "${auth_file:-none}" 2>&1 || true)
+if [[ "$auth_file_mode" == "400 0:0" ]]; then
+    pass "$auth_file is root's and only root may read it (400 0:0)"
+else
+    fail "Gluetun's auth file '$auth_file': $auth_file_mode (want 400 0:0)"
+fi
+forwarded=$(docker exec -e GLUETUN_API_KEY "$QBT" sh -c \
+    'curl -s --max-time 10 -H "X-API-Key: $GLUETUN_API_KEY" http://localhost:8000/v1/portforward' \
+    2>/dev/null | json_get port 2>/dev/null || echo 0)
+listen=$(qbt_preferences | json_get listen_port 2>/dev/null || echo "")
+if [[ "$forwarded" =~ ^[0-9]+$ ]] && ((forwarded > 0)) && [[ "$listen" == "$forwarded" ]]; then
+    pass "qBittorrent listens on Gluetun's forwarded port ($forwarded)"
+else
+    fail "forwarded port '$forwarded', qBittorrent listen port '$listen'"
+fi
+# Gluetun's effective capabilities (CapEff in /proc, a hex bit mask), as
+# names: exactly NET_ADMIN and NET_RAW. Its status files need neither CHOWN nor
+# DAC_OVERRIDE with PUID and PGID 0 and the /tmp/gluetun tmpfs.
+vpn_caps=$(docker exec "$VPN" cat /proc/1/status 2>/dev/null | python3 -I -c '
+import sys
+names = """CHOWN DAC_OVERRIDE DAC_READ_SEARCH FOWNER FSETID KILL SETGID SETUID SETPCAP
+LINUX_IMMUTABLE NET_BIND_SERVICE NET_BROADCAST NET_ADMIN NET_RAW IPC_LOCK IPC_OWNER
+SYS_MODULE SYS_RAWIO SYS_CHROOT SYS_PTRACE SYS_PACCT SYS_ADMIN SYS_BOOT SYS_NICE
+SYS_RESOURCE SYS_TIME SYS_TTY_CONFIG MKNOD LEASE AUDIT_WRITE AUDIT_CONTROL SETFCAP
+MAC_OVERRIDE MAC_ADMIN SYSLOG WAKE_ALARM BLOCK_SUSPEND AUDIT_READ PERFMON BPF
+CHECKPOINT_RESTORE""".split()
+masks = [line.split()[1] for line in sys.stdin if line.startswith("CapEff:")]
+if not masks:
+    sys.exit("?")
+mask = int(masks[0], 16)
+print(" ".join(sorted(names[i] if i < len(names) else f"bit{i}" for i in range(64) if mask >> i & 1)) or "none")' 2>&1 || true)
+if [[ "$vpn_caps" == "NET_ADMIN NET_RAW" ]]; then
+    pass "Gluetun's effective capabilities are exactly NET_ADMIN and NET_RAW"
+else
+    fail "Gluetun's effective capabilities: $vpn_caps (want NET_ADMIN NET_RAW)"
+fi
+# Gluetun writes the forwarded port to its status file too, as root's (PUID
+# and PGID 0), and logs any failure to create, chown or rewrite it.
+port_file=$(compose_value vpn env:VPN_PORT_FORWARDING_STATUS_FILE)
+port_file=${port_file:-/tmp/gluetun/forwarded_port}
+port_file_content=$(docker exec "$VPN" cat "$port_file" 2>&1 || true)
+port_file_owner=$(docker exec "$VPN" stat -c '%u:%g' "$port_file" 2>&1 || true)
+if [[ "$forwarded" =~ ^[0-9]+$ ]] && ((forwarded > 0)) &&
+    [[ "$port_file_content" == "$forwarded" && "$port_file_owner" == 0:0 ]]; then
+    pass "$port_file holds the forwarded port ($forwarded) and is owned by 0:0"
+else
+    fail "$port_file holds '$port_file_content', owner '$port_file_owner' (want '$forwarded', 0:0)"
+fi
+# A file it may not open fails with "permission denied" (EACCES), a chown or
+# chmod it may not make with "operation not permitted" (EPERM) after the
+# call's name. Not every EPERM: while the tunnel is down, the kill switch
+# refuses Gluetun's own packets out the other interface with it too.
+vpn_log=$(docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' "$VPN")" "$VPN" 2>&1 || true)
+file_errors=$(grep -iE 'chown|chmod|permission denied' <<<"$vpn_log" || true)
+if [[ -n "$vpn_log" && -z "$file_errors" ]]; then
+    pass "Gluetun logged no chown, chmod or permission error since it started"
+else
+    fail "Gluetun's log since it started: ${file_errors:-empty}"
+fi
+# qSticky's log since it started: it logged in to qBittorrent, and any error
+# (for example while qBittorrent was restarting) was followed by a successful
+# login or port update. qBittorrent 5.2+ answers login with 204, which older
+# qSticky rejected: that shows as errors with no success after them.
+qsticky_log=$(docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' "$QSTICKY")" "$QSTICKY" 2>&1 || true)
+qsticky_verdict=$(python3 -I -c '
+import re, sys
+lines = sys.stdin.read().splitlines()
+error = re.compile(r" - (ERROR|CRITICAL) - |Login failed")
+success = re.compile(r"Successfully (logged in to qBittorrent|updated port)|already set correctly")
+errors = [i for i, line in enumerate(lines) if error.search(line)]
+successes = [i for i, line in enumerate(lines) if success.search(line)]
+if not any("Successfully logged in to qBittorrent" in line for line in lines):
+    print("FAIL no successful login to qBittorrent")
+elif errors and not any(i > errors[-1] for i in successes):
+    print("FAIL " + lines[errors[-1]])
+else:
+    print(f"OK {len(errors)}")' <<<"$qsticky_log")
+if [[ "$qsticky_verdict" == "OK 0" ]]; then
+    pass "qSticky logged in to qBittorrent with no errors since it started"
+elif [[ "$qsticky_verdict" == OK* ]]; then
+    pass "qSticky logged in to qBittorrent; it recovered from ${qsticky_verdict#OK } error(s)"
+else
+    fail "qSticky log: ${qsticky_verdict#FAIL }"
+fi
+if [[ "$forwarded" =~ ^[0-9]+$ ]] && ((forwarded > 0)); then
+    check_interval=$(compose_value qsticky env:CHECK_INTERVAL)
+    wrong_port=$((forwarded < 65535 ? forwarded + 1 : forwarded - 1))
+    # Until qSticky is seen to restore it, the cleanup puts the port back.
+    restore_port=$forwarded
+    port_change_since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    if set_listen_port "$wrong_port"; then
+        # qSticky checks every CHECK_INTERVAL seconds, so its restore can take
+        # that long: it is checked at the end, by the same deadline from now.
+        port_restore_until=$((SECONDS + ${check_interval:-30} * 2 + 30))
+        port_restore=pending
+        echo "      set qBittorrent's listening port to $wrong_port; qSticky's restore is checked at the end"
+    else
+        fail "could not set qBittorrent's listening port through its API"
+    fi
+else
+    fail "qSticky check skipped: no forwarded port"
+fi
 
 echo "== published ports (loopback only)"
 # The web UIs have no password, so only this computer may reach them: every
@@ -713,183 +925,6 @@ else
     fail "resolver identity: ${resolver_verdict#FAIL }"
 fi
 
-echo "== port forwarding and qSticky"
-vpn_status=$(docker exec -e GLUETUN_API_KEY "$QBT" sh -c \
-    'curl -s --max-time 10 -H "X-API-Key: $GLUETUN_API_KEY" http://localhost:8000/v1/vpn/status' \
-    2>/dev/null | json_get status 2>/dev/null || true)
-if [[ "$vpn_status" == running ]]; then
-    pass "Gluetun control server reports the VPN running (API key accepted)"
-else
-    fail "Gluetun /v1/vpn/status: '$vpn_status'"
-fi
-# The control server must refuse requests without the right API key.
-for route in /v1/portforward /v1/vpn/status; do
-    for key in none wrong; do
-        header=""
-        [[ "$key" == wrong ]] && header="X-API-Key: wrong-$TEST_ID"
-        code=$(docker exec "$QBT" curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
-            ${header:+-H "$header"} "http://localhost:8000$route" 2>/dev/null || true)
-        if [[ "$code" == 401 ]]; then
-            pass "Gluetun control server refuses $route with $key API key (401)"
-        else
-            fail "Gluetun control server answered $route with $key API key: HTTP $code"
-        fi
-    done
-done
-# qSticky's role allows only GET /v1/portforward and GET /v1/vpn/status: with
-# its valid key, other routes must be refused. Read-only routes only (never a
-# PUT, or the v0 GET restart routes). Gluetun answers 404 for a route it does
-# not have, before any role check, so the 401s are refusals of real routes.
-# Prints the HTTP status of a GET with qSticky's key: control_get ROUTE
-control_get() {
-    docker exec -e GLUETUN_API_KEY "$QBT" sh -c \
-        'curl -s -o /dev/null -w "%{http_code}" --max-time 10 -H "X-API-Key: $GLUETUN_API_KEY" "http://localhost:8000$1"' \
-        sh "$1" 2>/dev/null || true
-}
-code=$(control_get "/v1/$TEST_ID")
-if [[ "$code" == 404 ]]; then
-    pass "Gluetun control server answers a route it does not have with 404 (valid API key)"
-else
-    fail "Gluetun control server answered the unknown route /v1/$TEST_ID with HTTP $code (want 404)"
-fi
-for route in /v1/publicip/ip /v1/dns/status /v1/vpn/settings /v1/updater/status /v1/version; do
-    code=$(control_get "$route")
-    if [[ "$code" == 401 ]]; then
-        pass "Gluetun control server refuses $route, outside qSticky's role, with its valid API key (401)"
-    else
-        fail "Gluetun control server answered $route (outside qSticky's role) with its valid API key: HTTP $code"
-    fi
-done
-# Those roles come from the auth file Compose writes into the container from
-# .env's GLUETUN_API_KEY (configs: gluetun_auth): the path Gluetun's startup
-# summary names must be that file, and Gluetun must have read its one role.
-auth_file=$(compose_value vpn config-target:gluetun_auth)
-vpn_log=$(docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' "$VPN")" "$VPN" 2>&1 || true)
-auth_summary=$(sed -n 's/.*Authentication file path: //p' <<<"$vpn_log" | tail -n 1)
-if [[ -n "$auth_file" && "$auth_summary" == "$auth_file" ]] &&
-    grep -q 'read 1 roles from authentication file' <<<"$vpn_log"; then
-    pass "Gluetun read 1 role from $auth_file, the file Compose writes from GLUETUN_API_KEY"
-else
-    fail "Gluetun's auth file is '$auth_summary', Compose writes '$auth_file'; read 1 role: $(grep -c 'read 1 roles from authentication file' <<<"$vpn_log")"
-fi
-auth_file_mode=$(docker exec "$VPN" stat -c '%a %u:%g' "${auth_file:-none}" 2>&1 || true)
-if [[ "$auth_file_mode" == "400 0:0" ]]; then
-    pass "$auth_file is root's and only root may read it (400 0:0)"
-else
-    fail "Gluetun's auth file '$auth_file': $auth_file_mode (want 400 0:0)"
-fi
-forwarded=$(docker exec -e GLUETUN_API_KEY "$QBT" sh -c \
-    'curl -s --max-time 10 -H "X-API-Key: $GLUETUN_API_KEY" http://localhost:8000/v1/portforward' \
-    2>/dev/null | json_get port 2>/dev/null || echo 0)
-listen=$(qbt_preferences | json_get listen_port 2>/dev/null || echo "")
-if [[ "$forwarded" =~ ^[0-9]+$ ]] && ((forwarded > 0)) && [[ "$listen" == "$forwarded" ]]; then
-    pass "qBittorrent listens on Gluetun's forwarded port ($forwarded)"
-else
-    fail "forwarded port '$forwarded', qBittorrent listen port '$listen'"
-fi
-# Gluetun's effective capabilities (CapEff in /proc, a hex bit mask), as
-# names: exactly NET_ADMIN and NET_RAW. Its status files need neither CHOWN nor
-# DAC_OVERRIDE with PUID and PGID 0 and the /tmp/gluetun tmpfs.
-vpn_caps=$(docker exec "$VPN" cat /proc/1/status 2>/dev/null | python3 -I -c '
-import sys
-names = """CHOWN DAC_OVERRIDE DAC_READ_SEARCH FOWNER FSETID KILL SETGID SETUID SETPCAP
-LINUX_IMMUTABLE NET_BIND_SERVICE NET_BROADCAST NET_ADMIN NET_RAW IPC_LOCK IPC_OWNER
-SYS_MODULE SYS_RAWIO SYS_CHROOT SYS_PTRACE SYS_PACCT SYS_ADMIN SYS_BOOT SYS_NICE
-SYS_RESOURCE SYS_TIME SYS_TTY_CONFIG MKNOD LEASE AUDIT_WRITE AUDIT_CONTROL SETFCAP
-MAC_OVERRIDE MAC_ADMIN SYSLOG WAKE_ALARM BLOCK_SUSPEND AUDIT_READ PERFMON BPF
-CHECKPOINT_RESTORE""".split()
-masks = [line.split()[1] for line in sys.stdin if line.startswith("CapEff:")]
-if not masks:
-    sys.exit("?")
-mask = int(masks[0], 16)
-print(" ".join(sorted(names[i] if i < len(names) else f"bit{i}" for i in range(64) if mask >> i & 1)) or "none")' 2>&1 || true)
-if [[ "$vpn_caps" == "NET_ADMIN NET_RAW" ]]; then
-    pass "Gluetun's effective capabilities are exactly NET_ADMIN and NET_RAW"
-else
-    fail "Gluetun's effective capabilities: $vpn_caps (want NET_ADMIN NET_RAW)"
-fi
-# Gluetun writes the forwarded port to its status file too, as root's (PUID
-# and PGID 0), and logs any failure to create, chown or rewrite it.
-port_file=$(compose_value vpn env:VPN_PORT_FORWARDING_STATUS_FILE)
-port_file=${port_file:-/tmp/gluetun/forwarded_port}
-port_file_content=$(docker exec "$VPN" cat "$port_file" 2>&1 || true)
-port_file_owner=$(docker exec "$VPN" stat -c '%u:%g' "$port_file" 2>&1 || true)
-if [[ "$forwarded" =~ ^[0-9]+$ ]] && ((forwarded > 0)) &&
-    [[ "$port_file_content" == "$forwarded" && "$port_file_owner" == 0:0 ]]; then
-    pass "$port_file holds the forwarded port ($forwarded) and is owned by 0:0"
-else
-    fail "$port_file holds '$port_file_content', owner '$port_file_owner' (want '$forwarded', 0:0)"
-fi
-# A file it may not open fails with "permission denied" (EACCES), a chown or
-# chmod it may not make with "operation not permitted" (EPERM) after the
-# call's name. Not every EPERM: while the tunnel is down, the kill switch
-# refuses Gluetun's own packets out the other interface with it too.
-vpn_log=$(docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' "$VPN")" "$VPN" 2>&1 || true)
-file_errors=$(grep -iE 'chown|chmod|permission denied' <<<"$vpn_log" || true)
-if [[ -n "$vpn_log" && -z "$file_errors" ]]; then
-    pass "Gluetun logged no chown, chmod or permission error since it started"
-else
-    fail "Gluetun's log since it started: ${file_errors:-empty}"
-fi
-# qSticky's log since it started: it logged in to qBittorrent, and any error
-# (for example while qBittorrent was restarting) was followed by a successful
-# login or port update. qBittorrent 5.2+ answers login with 204, which older
-# qSticky rejected: that shows as errors with no success after them.
-qsticky_log=$(docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' "$QSTICKY")" "$QSTICKY" 2>&1 || true)
-qsticky_verdict=$(python3 -I -c '
-import re, sys
-lines = sys.stdin.read().splitlines()
-error = re.compile(r" - (ERROR|CRITICAL) - |Login failed")
-success = re.compile(r"Successfully (logged in to qBittorrent|updated port)|already set correctly")
-errors = [i for i, line in enumerate(lines) if error.search(line)]
-successes = [i for i, line in enumerate(lines) if success.search(line)]
-if not any("Successfully logged in to qBittorrent" in line for line in lines):
-    print("FAIL no successful login to qBittorrent")
-elif errors and not any(i > errors[-1] for i in successes):
-    print("FAIL " + lines[errors[-1]])
-else:
-    print(f"OK {len(errors)}")' <<<"$qsticky_log")
-if [[ "$qsticky_verdict" == "OK 0" ]]; then
-    pass "qSticky logged in to qBittorrent with no errors since it started"
-elif [[ "$qsticky_verdict" == OK* ]]; then
-    pass "qSticky logged in to qBittorrent; it recovered from ${qsticky_verdict#OK } error(s)"
-else
-    fail "qSticky log: ${qsticky_verdict#FAIL }"
-fi
-if [[ "$forwarded" =~ ^[0-9]+$ ]] && ((forwarded > 0)); then
-    check_interval=$(compose_value qsticky env:CHECK_INTERVAL)
-    wrong_port=$((forwarded < 65535 ? forwarded + 1 : forwarded - 1))
-    restore_port=$forwarded
-    since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    # qSticky may correct the port within moments of the change (it checks every
-    # CHECK_INTERVAL seconds), so its own log line is the evidence, together with
-    # the port being back afterward.
-    restored=""
-    if set_listen_port "$wrong_port"; then
-        wait_until=$((SECONDS + ${check_interval:-30} * 2 + 30))
-        while ((SECONDS < wait_until)); do
-            listen=$(qbt_preferences | json_get listen_port 2>/dev/null || echo "")
-            qsticky_log=$(docker logs --since "$since" "$QSTICKY" 2>&1 || true)
-            if [[ "$listen" == "$forwarded" &&
-                "$qsticky_log" == *"Port change needed: $wrong_port -> $forwarded"* ]]; then
-                restored=yes
-                break
-            fi
-            sleep 3
-        done
-        if [[ "$restored" == yes ]]; then
-            pass "qSticky restored the listening port ($wrong_port -> $forwarded)"
-            restore_port=""
-        else
-            fail "qSticky did not restore the port (set $wrong_port; now '$listen')"
-        fi
-    else
-        fail "could not set qBittorrent's listening port through its API"
-    fi
-else
-    fail "qSticky check skipped: no forwarded port"
-fi
-
 echo "== qBittorrent"
 version=$(curl -s --max-time 10 "$QBT_URL/api/v2/app/version" || true)
 if [[ "$version" =~ ^v[0-9]+\. ]]; then
@@ -947,24 +982,6 @@ if [[ -z "$settings" ]]; then
     pass "download paths, /watch folder, UPnP off and the WebUI host names as the init script sets them"
 else
     fail "qBittorrent settings: $settings"
-fi
-watch_dir=$(compose_value qbittorrent mount:/watch)
-test_hash=$(python3 -I "$STACK_DIR/torrent_file.py" "$WORK/test.torrent" "$TEST_ID")
-watch_file="$watch_dir/$TEST_ID.torrent"
-cp "$WORK/test.torrent" "$watch_file"
-added=""
-for _ in $(seq 1 30); do
-    torrents=$(curl -s --max-time 10 "$QBT_URL/api/v2/torrents/info?hashes=$test_hash" || true)
-    if [[ "$torrents" == *"$test_hash"* ]]; then
-        added=yes
-        break
-    fi
-    sleep 2
-done
-if [[ "$added" == yes ]]; then
-    pass "a .torrent dropped in the watch folder was added"
-else
-    fail "a .torrent dropped in the watch folder was not added within 60s"
 fi
 
 echo "== Firefox"
@@ -1150,45 +1167,71 @@ else
 fi
 docker rm -f -v "$TEST_ID-proxy-target" >/dev/null 2>&1 || true
 
-echo "== Autoheal"
-start_period=$(compose_value autoheal env:AUTOHEAL_START_PERIOD)
-interval=$(compose_value autoheal env:AUTOHEAL_INTERVAL)
-uptime=$(python3 -I -c '
-import datetime, sys
-started = datetime.datetime.fromisoformat(sys.argv[1][:26].rstrip("Z") + "+00:00")
-print(int((datetime.datetime.now(datetime.timezone.utc) - started).total_seconds()))' \
-    "$(docker inspect -f '{{.State.StartedAt}}' "$AUTOHEAL")")
-if ((uptime < ${start_period:-0} + ${interval:-5})); then
-    wait_for=$((${start_period:-0} + ${interval:-5} - uptime))
-    echo "      autoheal started ${uptime}s ago; waiting ${wait_for}s for its start period"
-    sleep "$wait_for"
-fi
-for kind in labeled unlabeled; do
-    labels=()
-    [[ "$kind" == labeled ]] && labels=(--label autoheal=true)
-    docker run -d --name "$TEST_ID-$kind" --network none ${labels[@]+"${labels[@]}"} \
-        --health-cmd false --health-interval 2s --health-retries 1 --health-start-period 0s \
-        "$PLAIN_IMAGE" sleep 600 >/dev/null
+# The checks set going after the health checks. Each waits until its deadline,
+# counted from when it was set going (as when it waited right away), and looks
+# at least once, however long the checks in between took.
+
+echo "== qBittorrent: watch folder"
+added=""
+while :; do
+    torrents=$(curl -s --max-time 10 "$QBT_URL/api/v2/torrents/info?hashes=$test_hash" || true)
+    if [[ "$torrents" == *"$test_hash"* ]]; then
+        added=yes
+        break
+    fi
+    ((SECONDS < added_until)) || break
+    sleep 2
 done
-labeled_start=$(docker inspect -f '{{.State.StartedAt}}' "$TEST_ID-labeled")
-unlabeled_start=$(docker inspect -f '{{.State.StartedAt}}' "$TEST_ID-unlabeled")
+if [[ "$added" == yes ]]; then
+    pass "a .torrent dropped in the watch folder was added"
+else
+    fail "a .torrent dropped in the watch folder was not added within 60s"
+fi
+
+if [[ "$port_restore" == pending ]]; then
+    echo "== port forwarding and qSticky: the port restore"
+    # qSticky may correct the port within moments of the change, so its own log
+    # line is the evidence, together with the port being back afterward.
+    restored=""
+    while :; do
+        listen=$(qbt_preferences | json_get listen_port 2>/dev/null || echo "")
+        qsticky_log=$(docker logs --since "$port_change_since" "$QSTICKY" 2>&1 || true)
+        if [[ "$listen" == "$forwarded" &&
+            "$qsticky_log" == *"Port change needed: $wrong_port -> $forwarded"* ]]; then
+            restored=yes
+            break
+        fi
+        ((SECONDS < port_restore_until)) || break
+        sleep 3
+    done
+    if [[ "$restored" == yes ]]; then
+        pass "qSticky restored the listening port ($wrong_port -> $forwarded)"
+        restore_port=""
+    else
+        fail "qSticky did not restore the port (set $wrong_port; now '$listen')"
+    fi
+fi
+
+echo "== Autoheal"
 restarted=""
-wait_until=$((SECONDS + ${interval:-5} * 3 + 30))
-while ((SECONDS < wait_until)); do
+while :; do
     if [[ "$(docker inspect -f '{{.State.StartedAt}}' "$TEST_ID-labeled")" != "$labeled_start" ]]; then
         restarted=yes
         break
     fi
-    sleep 2
+    ((SECONDS < restart_until)) || break
+    sleep 0.5
 done
+# The unlabeled one has been unhealthy since it was started, through several
+# of Autoheal's passes and the whole labeled restart.
 unlabeled_health=$(docker inspect -f '{{.State.Health.Status}}' "$TEST_ID-unlabeled")
+unlabeled_now=$(docker inspect -f '{{.State.StartedAt}}' "$TEST_ID-unlabeled")
 if [[ "$restarted" == yes ]]; then
     pass "restarted an unhealthy container labeled autoheal=true"
 else
     fail "did not restart an unhealthy container labeled autoheal=true"
 fi
-if [[ "$(docker inspect -f '{{.State.StartedAt}}' "$TEST_ID-unlabeled")" == "$unlabeled_start" &&
-    "$unlabeled_health" == unhealthy ]]; then
+if [[ "$unlabeled_now" == "$unlabeled_start" && "$unlabeled_health" == unhealthy ]]; then
     pass "left an unhealthy unlabeled container alone"
 else
     fail "unlabeled test container was restarted or not unhealthy ($unlabeled_health)"
