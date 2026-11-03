@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>audio clock probe: loading</title>
+</head>
+<body>
+<pre id="result"></pre>
+<script>
+// Measures whether this browser's audio output keeps pace with real time: after a click (a
+// user gesture, which the autoplay policy needs), an AudioContext on the real audio output
+// renders silence for MEASURE_MS, and the page compares how far ctx.currentTime advanced
+// with how far performance.now() did. When macOS's audio server (coreaudiod) is overloaded,
+// the clock falls far behind real time and every audio check in tests/browser fails.
+//
+// Writes JSON to #result: {"state", "sampleRate", "ratio", "measuredMs"}, with "ratio" null
+// (and "startMs" the wait) if the context did not start running within START_TIMEOUT_MS.
+// tests/browser/run.sh loads it through page-result.mjs with CLICK_TITLE.
+const CLICK_TITLE = 'audio clock probe: click to start';
+const START_TIMEOUT_MS = 5000;
+const MEASURE_MS = 2000;
+
+const result = document.getElementById('result');
+const ctx = new AudioContext();
+// A silent source, so the graph renders as it does while the web UI plays.
+const source = ctx.createConstantSource();
+const silence = ctx.createGain();
+silence.gain.value = 0;
+source.connect(silence);
+silence.connect(ctx.destination);
+source.start();
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+async function measure() {
+    ctx.resume().catch(() => {});
+    const clicked = performance.now();
+    while (ctx.state !== 'running' && performance.now() - clicked < START_TIMEOUT_MS) {
+        await sleep(20);
+    }
+    if (ctx.state !== 'running') {
+        return {
+            state: ctx.state, sampleRate: ctx.sampleRate, ratio: null,
+            startMs: Math.round(performance.now() - clicked),
+        };
+    }
+    // currentTime advances in render quanta (128 frames, under 3 ms at 48 kHz), and Firefox
+    // updates it once per graph iteration (about 10 ms): small next to MEASURE_MS.
+    const start = [ctx.currentTime, performance.now()];
+    await sleep(MEASURE_MS);
+    const end = [ctx.currentTime, performance.now()];
+    const measuredMs = end[1] - start[1];
+    return {
+        state: ctx.state, sampleRate: ctx.sampleRate,
+        ratio: Math.round((end[0] - start[0]) / (measuredMs / 1000) * 1000) / 1000,
+        measuredMs: Math.round(measuredMs),
+    };
+}
+
+document.addEventListener('click', async () => {
+    const outcome = await measure();
+    await ctx.close();
+    result.textContent = JSON.stringify(outcome);
+}, { once: true });
+document.title = CLICK_TITLE;
+</script>
+</body>
+</html>

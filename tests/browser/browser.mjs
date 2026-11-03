@@ -28,6 +28,14 @@
 // Remote Settings client retries a request that failed through a proxy with the proxy
 // bypassed. Firefox also makes no DNS lookups (network.dns.disabled), which would leave this
 // computer even with every connection proxied; IP addresses and localhost still work.
+//
+// Every command (and Chrome's wait for a load event) fails after COMMAND_TIMEOUT_MS without a
+// reply, naming the command: a headless browser can hang (seen in Firefox 159 started at the
+// same moment as another, its main thread spinning), and a test should fail saying so rather
+// than wait forever. No command the tests send legitimately takes more than a few seconds.
+// Each attempt to reach the browser's endpoint is limited too (ATTEMPT_TIMEOUT_MS: a hung
+// browser can accept a connection and never answer), and a browser that ignores SIGTERM on
+// close gets SIGKILL after EXIT_GRACE_MS, so that the test's process can end.
 
 import { spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
@@ -35,6 +43,12 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 const CONNECT_TIMEOUT_MS = 30000;
+export const COMMAND_TIMEOUT_MS = 60000;
+const SESSION_END_MS = 5000;
+// How long one attempt to reach the browser's endpoint may take, and how long a stopped
+// browser has to exit after SIGTERM before it gets SIGKILL.
+const ATTEMPT_TIMEOUT_MS = 10000;
+const EXIT_GRACE_MS = 5000;
 const POLL_MS = 200;
 // The discard port: tests/browser/run.sh gives its --dump-dom Chrome the same proxy.
 export const CLOSED_PROXY = { host: '127.0.0.1', port: 9 };
@@ -52,12 +66,38 @@ const FIREFOX_PREFS = {
     'network.dns.disablePrefetch': true,
 };
 
+// A WebSocket open to URL; rejects if it is not open within ATTEMPT_TIMEOUT_MS (a hung
+// browser can accept the connection and never answer the handshake).
 function connectWebSocket(url) {
     return new Promise((resolve, reject) => {
         const ws = new WebSocket(url);
-        ws.onopen = () => resolve(ws);
-        ws.onerror = () => reject(new Error(`cannot connect to ${url}`));
+        const timer = setTimeout(() => {
+            ws.close();
+            reject(new Error(`no WebSocket handshake from ${url} within ${ATTEMPT_TIMEOUT_MS} ms ` +
+                '(the browser may be hung)'));
+        }, ATTEMPT_TIMEOUT_MS);
+        ws.onopen = () => {
+            clearTimeout(timer);
+            resolve(ws);
+        };
+        ws.onerror = () => {
+            clearTimeout(timer);
+            reject(new Error(`cannot connect to ${url}`));
+        };
     });
+}
+
+// Stops BROWSER (a child process): SIGTERM, then SIGKILL if it has not exited within
+// EXIT_GRACE_MS (a hung or stopped browser may never act on SIGTERM).
+async function stopBrowser(browser) {
+    if (browser.exitCode !== null || browser.signalCode !== null) {
+        return;
+    }
+    const exited = new Promise(resolve => browser.once('exit', resolve));
+    browser.kill();
+    const timer = setTimeout(() => browser.kill('SIGKILL'), EXIT_GRACE_MS);
+    await exited;
+    clearTimeout(timer);
 }
 
 // Retries CONNECT until it resolves, for up to CONNECT_TIMEOUT_MS.
@@ -75,8 +115,25 @@ async function retry(what, connect) {
     }
 }
 
+// The error a command or wait WHAT fails with when the browser does not answer in time.
+function noReply(what) {
+    return new Error(`${what}: no reply from the browser within ${COMMAND_TIMEOUT_MS} ms ` +
+        '(it may be hung)');
+}
+
+// PROMISE, or a rejection with noReply(WHAT) if it has not settled within COMMAND_TIMEOUT_MS.
+function withTimeout(promise, what) {
+    let timer;
+    const timeout = new Promise((resolve, reject) => {
+        timer = setTimeout(() => reject(noReply(what)), COMMAND_TIMEOUT_MS);
+        // The timer alone does not keep the process running.
+        timer.unref();
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 // JSON commands over WS with numeric ids; ERROR_OF(message) is the error text of a failed
-// reply, or undefined.
+// reply, or undefined. A command with no reply within COMMAND_TIMEOUT_MS rejects.
 function commandClient(ws, errorOf) {
     let nextId = 1;
     const pending = new Map();
@@ -87,6 +144,7 @@ function commandClient(ws, errorOf) {
             return;
         }
         pending.delete(message.id);
+        clearTimeout(handler.timer);
         const error = errorOf(message);
         if (error) {
             handler.reject(new Error(error));
@@ -96,7 +154,12 @@ function commandClient(ws, errorOf) {
     };
     return (method, params = {}) => new Promise((resolve, reject) => {
         const id = nextId++;
-        pending.set(id, { resolve, reject });
+        const timer = setTimeout(() => {
+            pending.delete(id);
+            reject(noReply(method));
+        }, COMMAND_TIMEOUT_MS);
+        timer.unref();
+        pending.set(id, { resolve, reject, timer });
         ws.send(JSON.stringify({ id, method, params }));
     });
 }
@@ -115,7 +178,8 @@ async function launchChrome(binary, profile, port) {
     const browser = spawn(binary, chromeArgs(profile, port), { stdio: 'ignore' });
     try {
         const wsUrl = await retry(`no DevTools page target on port ${port}`, async () => {
-            const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+            const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`,
+                { signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS) })).json();
             const page = targets.find(target => target.type === 'page');
             if (!page) {
                 throw new Error('no page yet');
@@ -148,7 +212,7 @@ async function launchChrome(binary, profile, port) {
             async navigate(url) {
                 const done = new Promise(resolve => { loaded = resolve; });
                 await send('Page.navigate', { url });
-                await done;
+                await withTimeout(done, `the load event of ${url}`);
             },
             evaluate,
             async click(x, y) {
@@ -173,11 +237,11 @@ async function launchChrome(binary, profile, port) {
             },
             async close() {
                 ws.close();
-                browser.kill();
+                await stopBrowser(browser);
             },
         };
     } catch (err) {
-        browser.kill();
+        await stopBrowser(browser);
         throw err;
     }
 }
@@ -251,13 +315,14 @@ async function launchFirefox(binary, profile, port) {
                 await send('script.addPreloadScript', { functionDeclaration: source });
             },
             async close() {
-                await send('session.end').catch(() => {});
+                // A hung browser never answers: stop it after SESSION_END_MS regardless.
+                await Promise.race([send('session.end').catch(() => {}), sleep(SESSION_END_MS)]);
                 ws.close();
-                browser.kill();
+                await stopBrowser(browser);
             },
         };
     } catch (err) {
-        browser.kill();
+        await stopBrowser(browser);
         throw err;
     }
 }
