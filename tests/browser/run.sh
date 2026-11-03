@@ -320,10 +320,12 @@ web_ui_job() {
 local_harnesses() {
     local kind=$1 binary=$2 result
     if [[ "$kind" == chrome ]]; then
-        # The proxy is browser.mjs's CLOSED_PROXY: Chrome reaches only loopback.
+        # The proxy is browser.mjs's CLOSED_PROXY: Chrome reaches only loopback;
+        # and, as browser.mjs's chromeArgs, no background requests or updater.
         result=$("$binary" --headless=new --disable-gpu --no-first-run \
             --user-data-dir="$WORK/profiles/chrome" --virtual-time-budget=10000 \
             --proxy-server=127.0.0.1:9 \
+            --disable-background-networking --disable-component-update \
             --dump-dom "$URL" 2>/dev/null | sed -n 's:.*<pre id="result">\(.*\)</pre>.*:\1:p')
     else
         result=$(node "$BROWSER_DIR/page-result.mjs" firefox "$binary" "$WORK/profiles/firefox" \

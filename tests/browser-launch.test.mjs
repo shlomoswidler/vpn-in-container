@@ -47,13 +47,21 @@ test('Chrome driven by browser.mjs uses the closed proxy, with no bypass list', 
     assert.ok(!args.some(arg => arg.includes('direct')), args.join(' '));
 });
 
-test('every Chrome that run.sh starts itself uses the closed proxy', () => {
+test('Chrome driven by browser.mjs makes no background requests and runs no updater', () => {
+    const args = chromeArgs('/profile', 9222);
+    assert.ok(args.includes('--disable-background-networking'), args.join(' '));
+    assert.ok(args.includes('--disable-component-update'), args.join(' '));
+});
+
+test('every Chrome that run.sh starts itself uses the closed proxy, with no background requests', () => {
     const script = readFileSync(join(browserDir, 'run.sh'), 'utf8');
     // Each command that starts Chrome headless, with its continuation lines.
     const commands = script.split(/(?<!\\)\n/).filter(command => command.includes('--headless'));
     assert.ok(commands.length > 0, 'run.sh starts no headless Chrome');
     for (const command of commands) {
         assert.ok(command.includes(proxyArg), command);
+        assert.ok(command.includes('--disable-background-networking'), command);
+        assert.ok(command.includes('--disable-component-update'), command);
     }
 });
 

@@ -164,12 +164,16 @@ function commandClient(ws, errorOf) {
     });
 }
 
-// Chrome's command-line arguments, for PROFILE and the DevTools port PORT.
+// Chrome's command-line arguments, for PROFILE and the DevTools port PORT. The test browsers
+// may reach only loopback: besides the closed proxy, Chrome is told not to make its own
+// background requests (--disable-background-networking) or run its component updater
+// (--disable-component-update), so it does not even try.
 export function chromeArgs(profile, port) {
     return [
         '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
         `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, '--mute-audio',
         `--proxy-server=${CLOSED_PROXY.host}:${CLOSED_PROXY.port}`,
+        '--disable-background-networking', '--disable-component-update',
         '--autoplay-policy=document-user-activation-required', 'about:blank',
     ];
 }
