@@ -40,8 +40,23 @@
 # profiles. The containers start first, and the local harnesses run while they
 # boot. The results print in order once all are done.
 #
+# First, in each browser, a probe (audio-clock-probe.html) checks that the
+# browser's real audio output keeps pace with real time: when macOS's audio
+# server (coreaudiod) is overloaded, an AudioContext's clock can run far slower
+# (0.14-0.18x was measured), and every audio check would fail for that reason
+# alone. If the probe's clock runs below AUDIO_CLOCK_MIN, that browser's audio
+# checks (its audio harness and web UI audio parts) are skipped and count as
+# failed, after one FAIL line naming the cause. If the probe could not measure
+# (its AudioContext did not start), a warn line says so and the audio checks run
+# as usual (probe_verdict). The probe runs while the containers boot.
+#
+# The whole run is limited to BROWSER_TIMEOUT_S seconds: past it, the run
+# prints which jobs were still running, stops everything it started and fails
+# (a headless browser can hang; see browser.mjs).
+#
 # Usage: tests/browser/run.sh   (needs docker, python3, node, and Google
 #        Chrome and/or Firefox in /Applications)
+#        BROWSER_TIMEOUT_S=N overrides the time limit.
 
 set -euo pipefail
 
@@ -65,6 +80,19 @@ WEB_CONTAINERS=()
 # that refuses at once keeps Firefox from waiting out DNS timeouts as it quits
 # (each `docker restart` below quits it).
 NO_DNS_ARGS=(--dns 127.0.0.1 --dns-opt timeout:1 --dns-opt attempts:1)
+# The time limit on the whole run, in seconds. Whole runs measured 55-78 s
+# alone (6 runs) and up to 140 s with three runs at once on a loaded 16-CPU
+# Mac, so this is over 4 times the slowest; the in-test timeouts (browser.mjs's
+# per-command limit, web-ui-audio.mjs's waits) normally fail a stuck check first.
+BROWSER_TIMEOUT_S=${BROWSER_TIMEOUT_S:-600}
+# The overall timer (a process group of its own): see start_timer.
+TIMER_PID=""
+# The slowest a probe AudioContext's clock may run, as a fraction of real time.
+# Measured on this suite's Mac: 0.992-1.001 when healthy (41 probes: alone, 8
+# browsers at once, and in suite runs), 0.136-0.179 with coreaudiod overloaded,
+# and 0.853-0.858 with Firefox's mock audio backend, at which the audio
+# harness's tone checks failed every time.
+AUDIO_CLOCK_MIN=0.95
 
 stop_web_ui() {
     [[ -n "$TUNNEL_PID" ]] && kill "$TUNNEL_PID" 2>/dev/null || true
@@ -85,6 +113,7 @@ stop_job() {
 
 cleanup() {
     local pid
+    [[ -n "$TIMER_PID" ]] && kill -- "-$TIMER_PID" 2>/dev/null || true
     for pid in ${JOB_PIDS[@]+"${JOB_PIDS[@]}"}; do
         stop_job "$pid"
     done
@@ -98,6 +127,39 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# on_timeout: the overall timer ran out: names the jobs still running and fails
+# (cleanup, on exit, stops them and removes the containers).
+on_timeout() {
+    local i running=""
+    for i in ${JOB_PIDS[@]+"${!JOB_PIDS[@]}"}; do
+        if kill -0 -- "-${JOB_PIDS[$i]}" 2>/dev/null; then
+            running="$running ${JOB_NAMES[$i]}"
+        fi
+    done
+    echo "FAIL  the browser checks did not finish within $BROWSER_TIMEOUT_S s" \
+        "(a browser or container may be hung); still running:${running:- none}." \
+        "Stopped everything they started."
+    exit 1
+}
+trap on_timeout USR1
+
+# start_timer: after BROWSER_TIMEOUT_S, signals this shell (on_timeout). A
+# signal is handled once the command in the foreground ends (wait ends at
+# once), so if this shell is still running 30 s later, the timer stops its
+# children, which ends that command.
+start_timer() {
+    set -m
+    (
+        sleep "$BROWSER_TIMEOUT_S"
+        kill -USR1 $$
+        sleep 30
+        pkill -TERM -P $$
+    ) </dev/null >/dev/null 2>&1 &
+    TIMER_PID=$!
+    set +m
+}
+start_timer
 
 docker compose -f "$REPO/docker-compose.yml" config --format json >"$WORK/compose.json"
 python3 -I "$REPO/tests/e2e/service_args.py" <"$WORK/compose.json" >"$WORK/service-args"
@@ -135,7 +197,7 @@ print("\n".join(str(s.getsockname()[1]) for s in sockets))
 ' "$1"
 }
 
-# The browsers found, and a port for each job's browser (5 per browser) and the server.
+# The browsers found, and a port for each job's browser (6 per browser) and the server.
 kinds=()
 binaries=()
 for kind in chrome firefox; do
@@ -147,8 +209,8 @@ done
 PORTS=()
 while IFS= read -r port; do
     PORTS+=("$port")
-done < <(free_ports $((1 + 5 * ${#kinds[@]})))
-mkdir -p "$WORK/profiles" "$WORK/results" "$WORK/logs"
+done < <(free_ports $((1 + 6 * ${#kinds[@]})))
+mkdir -p "$WORK/profiles" "$WORK/results" "$WORK/logs" "$WORK/probe" "$WORK/site"
 
 # start_job NAME FUNCTION ARGS...: runs FUNCTION ARGS... in the background, in a
 # subshell in a process group of its own; its output in $WORK/logs/NAME.
@@ -232,6 +294,8 @@ web_ui_job() {
     fi
     if [[ -z "${WEB_UI_URL:-}" ]]; then
         cp "$start" "$out"
+    elif [[ "$part" != windows ]] && ! audio_ok "$kind"; then
+        echo "$SKIPPED" >"$out"
     elif [[ "$part" == windows ]]; then
         result=$(node "$BROWSER_DIR/web-ui-windows.mjs" "$kind" "$binary" \
             "$WORK/profiles/$kind-windows" "$port" "$WEB_UI_URL" "$WEB_CONTAINER") || true
@@ -266,10 +330,98 @@ local_harnesses() {
             "$3" "$URL") || true
     fi
     printf '%s\n' "$result" >"$WORK/results/$kind-cursor"
-    result=$(node "$BROWSER_DIR/page-result.mjs" "$kind" "$binary" \
-        "$WORK/profiles/$kind-audio" "$4" "$AUDIO_URL" "$AUDIO_CLICK_TITLE") || true
+    if audio_ok "$kind"; then
+        result=$(node "$BROWSER_DIR/page-result.mjs" "$kind" "$binary" \
+            "$WORK/profiles/$kind-audio" "$4" "$AUDIO_URL" "$AUDIO_CLICK_TITLE") || true
+    else
+        result=$SKIPPED
+    fi
     printf '%s\n' "$result" >"$WORK/results/$kind-audio"
 }
+
+# The audio probe page, and the title at which it waits for a click.
+PROBE_CLICK_TITLE="audio clock probe: click to start"
+# What a skipped audio check leaves as its result.
+SKIPPED='{"error":"skipped: the audio output runs too slowly (see its FAIL line)"}'
+
+# probe_verdict RESULT: the audio probe's RESULT (JSON, or why it did not run)
+# judged against AUDIO_CLOCK_MIN, on one line: "ok WHAT"; "slow WHY" (the clock
+# runs too slowly: the audio checks are skipped and the run fails); "warn WHY"
+# (the probe's AudioContext did not start, so the clock could not be measured:
+# Firefox sometimes never starts one, see
+# docs/agents_output/debugging/browser-firefox-audio-resume.md; the audio checks
+# run anyway and fail on their own if audio does not work); or "fail WHY" (the
+# probe did not finish, e.g. its browser hung: the run fails, and the audio
+# checks run anyway).
+probe_verdict() {
+    python3 -I -c '
+import json, sys
+text, minimum = sys.argv[1], float(sys.argv[2])
+try:
+    result = json.loads(text)
+except ValueError:
+    result = {"error": text.strip() or "no result"}
+if not isinstance(result, dict):
+    result = {"error": text.strip()}
+ratio, rate = result.get("ratio"), result.get("sampleRate")
+state, start_ms, measured_ms = result.get("state"), result.get("startMs"), result.get("measuredMs")
+if "error" in result:
+    print("fail the audio probe did not finish: " + str(result["error"]))
+elif ratio is None:
+    print(f"warn a probe AudioContext did not start running within {start_ms} ms of a click "
+          f"(state {state}), so the clock could not be measured; the audio checks run anyway")
+elif ratio < minimum:
+    print(f"slow the audio output of this Mac runs at {ratio}x real time (at least {minimum}x "
+          f"needed; a probe AudioContext at {rate} Hz over {measured_ms} ms): "
+          "the macOS audio server may be overloaded (check: ps -A -o %cpu,command | grep "
+          "coreaudiod; restart it: sudo killall coreaudiod)")
+else:
+    print(f"ok the audio output keeps pace: {ratio}x real time ({rate} Hz, over "
+          f"{measured_ms} ms)")
+' "$1" "$AUDIO_CLOCK_MIN"
+}
+
+# audio_probe KIND BINARY PORT: the audio probe in browser KIND (its DevTools or
+# WebDriver BiDi port PORT); its verdict (probe_verdict) in $WORK/probe/KIND,
+# written whole. Run as a job.
+audio_probe() {
+    local kind=$1 result
+    result=$(node "$BROWSER_DIR/page-result.mjs" "$kind" "$2" "$WORK/profiles/$kind-probe" \
+        "$3" "$PROBE_URL" "$PROBE_CLICK_TITLE") || true
+    probe_verdict "$result" >"$WORK/probe/$kind.tmp" ||
+        echo "fail the audio probe's result could not be judged: $result" >"$WORK/probe/$kind.tmp"
+    mv "$WORK/probe/$kind.tmp" "$WORK/probe/$kind"
+}
+
+# audio_ok KIND: waits for the audio probe's verdict in browser KIND; exits 0
+# unless it found the clock too slow. (The probe job always leaves one; the
+# overall time limit ends the wait if it hangs.)
+audio_ok() {
+    while [[ ! -e "$WORK/probe/$1" ]]; do
+        sleep 0.2
+    done
+    [[ "$(cat "$WORK/probe/$1")" != slow* ]]
+}
+
+# The server for the local pages, first: the probes need it.
+cp "$BROWSER_DIR/audio-clock-probe.html" "$WORK/site/"
+PORT=${PORTS[0]}
+python3 -I -m http.server "$PORT" --bind 127.0.0.1 --directory "$WORK/site" >/dev/null 2>&1 &
+SERVER_PID=$!
+URL="http://127.0.0.1:$PORT/harness.html"
+AUDIO_URL="http://127.0.0.1:$PORT/audio-harness.html"
+PROBE_URL="http://127.0.0.1:$PORT/audio-clock-probe.html"
+for _ in $(seq 1 50); do
+    curl -sf -o /dev/null "$PROBE_URL" && break
+    sleep 0.1
+done
+
+# The audio probes, while the containers come up.
+for i in ${kinds[@]+"${!kinds[@]}"}; do
+    kind=${kinds[$i]}
+    mkdir -p "$WORK/profiles/$kind-probe"
+    start_job "$kind-probe" audio_probe "$kind" "${binaries[$i]}" "${PORTS[$((6 + 6 * i))]}"
+done
 
 # The web UI containers first: they take the longest to come up.
 for i in ${kinds[@]+"${!kinds[@]}"}; do
@@ -279,10 +431,10 @@ for i in ${kinds[@]+"${!kinds[@]}"}; do
     for part in reconnect muted windows; do
         WEB_CONTAINERS+=("web-ui-$$-$kind-$part")
     done
-    start_job "$kind-reconnect" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((1 + 5 * i))]}" \
+    start_job "$kind-reconnect" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((1 + 6 * i))]}" \
         reconnect
-    start_job "$kind-muted" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((2 + 5 * i))]}" muted
-    start_job "$kind-windows" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((3 + 5 * i))]}" \
+    start_job "$kind-muted" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((2 + 6 * i))]}" muted
+    start_job "$kind-windows" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((3 + 6 * i))]}" \
         windows
 done
 
@@ -386,22 +538,12 @@ print(json.dumps(merged, separators=(",", ":"), ensure_ascii=False))
 ' "$1" "$2"
 }
 
-PORT=${PORTS[0]}
-python3 -I -m http.server "$PORT" --bind 127.0.0.1 --directory "$WORK/site" >/dev/null 2>&1 &
-SERVER_PID=$!
-URL="http://127.0.0.1:$PORT/harness.html"
-AUDIO_URL="http://127.0.0.1:$PORT/audio-harness.html"
-for _ in $(seq 1 50); do
-    curl -sf -o /dev/null "$URL" && break
-    sleep 0.1
-done
-
 # The local harnesses, while the containers come up.
 for i in ${kinds[@]+"${!kinds[@]}"}; do
     kind=${kinds[$i]}
     mkdir -p "$WORK/profiles/$kind" "$WORK/profiles/$kind-audio"
     start_job "$kind-harnesses" local_harnesses "$kind" "${binaries[$i]}" \
-        "${PORTS[$((4 + 5 * i))]}" "${PORTS[$((5 + 5 * i))]}"
+        "${PORTS[$((4 + 6 * i))]}" "${PORTS[$((5 + 6 * i))]}"
 done
 
 versions=()
@@ -446,6 +588,20 @@ JOB_PIDS=()
 for i in ${kinds[@]+"${!kinds[@]}"}; do
     kind=${kinds[$i]}
     version=${versions[$i]}
+    verdict=$(cat "$WORK/probe/$kind" 2>/dev/null || echo "fail the audio probe left no verdict")
+    case "$verdict" in
+        ok*) echo "ok    $version audio output: ${verdict#ok }" ;;
+        warn*) echo "warn  $version audio output: ${verdict#warn }" ;;
+        slow*)
+            echo "FAIL  $version audio output: ${verdict#slow }"
+            echo "      so its audio checks (audio, web UI) were skipped and count as failed"
+            failures=$((failures + 1))
+            ;;
+        *)
+            echo "FAIL  $version audio output: ${verdict#fail }"
+            failures=$((failures + 1))
+            ;;
+    esac
     report "$version cursor" "$(result "$kind-cursor")" "$EXPECTED"
     report "$version audio" "$(result "$kind-audio")" "$AUDIO_CASES"
     report "$version web UI" \
@@ -453,7 +609,7 @@ for i in ${kinds[@]+"${!kinds[@]}"}; do
         "$WEB_UI_CASES"
     report "$version windows" "$(result "$kind-windows")" "$WINDOWS_CASES"
     # What the jobs printed besides their results (errors from the tools they ran).
-    for job in harnesses reconnect muted windows; do
+    for job in probe harnesses reconnect muted windows; do
         if [[ -s "$WORK/logs/$kind-$job" ]]; then
             echo "      $kind-$job output:"
             sed 's/^/      /' "$WORK/logs/$kind-$job"
