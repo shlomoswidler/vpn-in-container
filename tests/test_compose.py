@@ -24,6 +24,7 @@ COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 ENV_FILE = REPO_ROOT / ".env.example"
 GENERATOR = REPO_ROOT / "config" / "cursors" / "generate_native_theme.py"
 IMAGE_OVERLAYS = REPO_ROOT / "tests" / "image_overlays.py"
+SERVICE_ARGS = REPO_ROOT / "tests" / "e2e" / "service_args.py"
 PROXY_TEMPLATE = REPO_ROOT / "config" / "autoheal-proxy" / "haproxy.cfg"
 
 # name:tag@sha256:<digest>. The name may include a registry host and port; the tag is the
@@ -218,12 +219,30 @@ def generator_nominal_size() -> int:
     return module.NOMINAL_SIZE
 
 
-def image_overlays() -> tuple:
-    """The patched image files tests/image_overlays.py checks against the image's."""
+def load_image_overlays():
+    """tests/image_overlays.py, loaded by path (tests/ is not on sys.path)."""
     spec = importlib.util.spec_from_file_location("image_overlays", IMAGE_OVERLAYS)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.OVERLAYS
+    return module
+
+
+def image_overlays() -> tuple:
+    """The patched image files tests/image_overlays.py checks against the image's."""
+    return load_image_overlays().OVERLAYS
+
+
+def image_overlay_additions() -> tuple:
+    """The files of the repo's own tests/image_overlays.py checks the image's directories for."""
+    return load_image_overlays().ADDITIONS
+
+
+def e2e_service_args(config: dict) -> list[str]:
+    """The `docker run` arguments the browser and e2e tests start Firefox with, for CONFIG."""
+    spec = importlib.util.spec_from_file_location("service_args", SERVICE_ARGS)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.service_args(config)
 
 
 def run_compose_config(env_file: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
@@ -718,8 +737,15 @@ class ComposeTests(unittest.TestCase):
             if volume.get("target", "").startswith(("/opt/noVNC/", "/etc/services.d/"))
         }
         overlays = {overlay.target: overlay for overlay in image_overlays()}
-        # Files of the repo's own, not overlays of the image's: nothing to check them against.
-        own = {"/opt/noVNC/core/util/cursor-keyword.js", "/opt/noVNC/core/util/core-glyphs.js"}
+        # Files of the repo's own, not overlays of the image's: no image file to check them
+        # against. The image has no /etc/services.d/xrdb/sync; the file adds the sync flag to
+        # its xrdb service (tests/image_overlays.py checks that the image still has that
+        # service, and no sync file of its own).
+        own = {
+            "/opt/noVNC/core/util/cursor-keyword.js",
+            "/opt/noVNC/core/util/core-glyphs.js",
+            "/etc/services.d/xrdb/sync",
+        }
         self.assertEqual(set(mounted), set(overlays) | own)
         for target, overlay in overlays.items():
             with self.subTest(target=target):
@@ -736,6 +762,33 @@ class ComposeTests(unittest.TestCase):
         )
         self.assertEqual(kill["source"], str(REPO_ROOT / "config" / "firefox-services" / "kill"))
         self.assertIs(kill.get("read_only"), True)
+
+    def test_firefox_mounts_the_xrdb_sync_flag_read_only(self):
+        # The image's supervisor (cinit) checks once, right after starting the xrdb service,
+        # that it is still running, and stops the container when it has already exited (it
+        # takes milliseconds). With sync it waits for xrdb's exit instead. cinit reads the file
+        # as a boolean: 1 (with or without a newline), true, yes or an empty file turn it on;
+        # 0 or false leave it off; text that is not a boolean stops the container (measured
+        # with each of these). It runs an executable file and reads its output instead, so
+        # this one must not be executable.
+        source = REPO_ROOT / "config" / "firefox-services" / "xrdb-sync"
+        sync = [
+            volume
+            for volume in self.services["firefox"].get("volumes", [])
+            if volume.get("target") == "/etc/services.d/xrdb/sync"
+        ]
+        self.assertEqual(len(sync), 1)
+        self.assertEqual(sync[0]["source"], str(source))
+        self.assertIs(sync[0].get("read_only"), True)
+        self.assertEqual(source.read_bytes(), b"1\n")
+        self.assertEqual(source.stat().st_mode & 0o111, 0)
+        # The file tests/image_overlays.py checks the image's xrdb service for.
+        self.assertIn(
+            ("config/firefox-services", "xrdb-sync", "/etc/services.d/xrdb/sync"),
+            [tuple(addition)[:3] for addition in image_overlay_additions()],
+        )
+        # The browser and e2e tests start Firefox with it too (tests/e2e/service_args.py).
+        self.assertIn(f"{source}:/etc/services.d/xrdb/sync:ro", e2e_service_args(self.config))
 
     def test_firefox_cursor_size_matches_the_theme(self):
         size = self.services["firefox"].get("environment", {}).get("XCURSOR_SIZE")

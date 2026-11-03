@@ -732,7 +732,8 @@ vpn-in-container/
 │   │   └── customKeys.json # Clears the new-window, reopen-window and stock Quit shortcuts
 │   ├── firefox-services/
 │   │   ├── kill            # Patched shutdown script: quits Firefox with Ctrl+Alt+Shift+Q
-│   │   └── kill.patch, kill.upstream.sha256  # How kill differs from the image's
+│   │   ├── kill.patch, kill.upstream.sha256  # How kill differs from the image's
+│   │   └── xrdb-sync       # The image's xrdb service finishes before Firefox starts
 │   ├── firefox-init.d/
 │   │   ├── 54-firefox-private-browsing.sh  # Refuses a FIREFOX_PRIVATE_BROWSING but true/false
 │   │   ├── 57-openbox-no-keepborder.sh  # Removes the 1px top border (unthemed cursor strip)
@@ -755,7 +756,8 @@ vpn-in-container/
 │   ├── browser-launch.test.mjs        # The test browsers' loopback-only proxy settings
 │   ├── test_generate_native_theme.py  # python3 -m unittest discover -s tests
 │   ├── test_make_core_glyph_table.py
-│   ├── image_overlays.py   # Checks each patched file is the image's file plus its patch
+│   ├── image_overlays.py   # Checks each patched file is the image's file plus its patch,
+│   │                       # and that the image's xrdb service still takes xrdb-sync
 │   ├── e2e/run.sh          # Real Firefox in throwaway containers: cursors, windows, sound (Docker)
 │   ├── stack/run.sh        # Running stack: VPN, kill switch, ports, qBittorrent, Autoheal
 │   ├── qbittorrent/download.sh  # Isolated real download test for the qBittorrent image

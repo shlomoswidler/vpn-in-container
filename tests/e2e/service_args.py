@@ -5,9 +5,10 @@ that reproduce its browser setup: the XCURSOR_*, display, WEB_AUDIO and FF_PREF_
 environment variables, and the read-only mounts under the cursor-related
 directories, the Firefox profile (userChrome.css, customKeys.json), the
 Firefox install directory (autoconfig) and the image's services (the shutdown
-script, /etc/services.d/app/kill). It also carries the service's security
-options, capabilities, read-only root and limits (tests/run_args.py), so the
-test runs Firefox as hardened as the service.
+script, /etc/services.d/app/kill, and xrdb's sync flag,
+/etc/services.d/xrdb/sync). It also carries the service's security options,
+capabilities, read-only root and limits (tests/run_args.py), so the test runs
+Firefox as hardened as the service.
 """
 
 import importlib.util
