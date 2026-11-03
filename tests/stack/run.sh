@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # End-to-end test of the running stack (docker compose up -d first).
 #
-# It connects from this computer itself only to localhost, and to this
-# computer's own addresses (that the web UIs are not published there); every
-# look at the outside world from the host's side goes through a throwaway
-# container on Docker's default network (see PY_IMAGE).
+# It connects from this computer itself only to localhost. Every look at the
+# outside world from the host's side goes through a throwaway container on
+# Docker's default network (see PY_IMAGE), and the tries at this computer's own
+# non-loopback addresses through one on Docker's host network (see
+# PORT_PROBE_PY).
 #
 # Checks real behavior, not just container status:
 #   - every service runs the image docker-compose.yml pins, and is healthy;
 #     Autoheal's image, built here, has the labels of the commit and base image
 #     docker-compose.yml builds it from
 #   - the web UIs are published on 127.0.0.1 only: they answer at localhost,
-#     but not at this computer's LAN address or any other address it has
+#     but not at this computer's LAN address or any other address it has (as
+#     tried from a container), and only loopback sockets listen on their ports
 #   - traffic from all three VPN-routed containers leaves through the VPN
 #     (same public IP, different from the host's), and the kill switch drops
 #     TCP and ICMP forced around the tunnel (while the same probes through the
@@ -616,6 +618,61 @@ if [[ "$bindings_verdict" == OK* ]]; then
 else
     fail "published ports: ${bindings_verdict#FAIL }"
 fi
+web_uis=("Firefox $FIREFOX_URL/ 5800" "qBittorrent $QBT_URL/api/v2/app/version 9080")
+probe_ports=""
+for web_ui in "${web_uis[@]}"; do
+    probe_ports="$probe_ports${probe_ports:+,}${web_ui##* }"
+done
+# What listens on the web UIs' ports, without any connection: every TCP socket
+# listening on this computer, of every user, with its local address (netstat
+# -anv on macOS, which also names each one's process, such as OrbStack Helper
+# for the ports OrbStack publishes; ss on Linux). A socket on a non-loopback
+# address, or on all of them (*, 0.0.0.0, ::), fails; no firewall can make
+# this pass. Reads the listing on stdin: python3 -I -c "$LISTENING_PY" PORT,...
+# Prints "OK <sockets>", "FAIL <sockets>" or "NONE <ports nothing listens on>".
+LISTENING_PY='
+import ipaddress, sys
+ports = sys.argv[1].split(",")
+found = {port: [] for port in ports}
+for line in sys.stdin:
+    words = line.split()
+    if len(words) >= 6 and words[0].startswith("tcp") and words[5] == "LISTEN":
+        host, port = words[3].rsplit(".", 1)
+        process = " ".join(words[10:-8]) if len(words) >= 19 else "?"
+    elif len(words) >= 5 and words[0] == "LISTEN":
+        host, port = words[3].rsplit(":", 1)
+        host = host.strip("[]")
+        process = " ".join(words[5:]) or "?"
+    else:
+        continue
+    if port not in found:
+        continue
+    try:
+        loopback = host != "*" and ipaddress.ip_address(host.split("%")[0]).is_loopback
+    except ValueError:
+        loopback = False
+    found[port].append((loopback, host + ":" + port + " (" + process + ")"))
+sockets = [entry for port in ports for entry in found[port]]
+shown = ", ".join(text for _, text in sockets)
+if not all(loopback for loopback, _ in sockets):
+    print("FAIL " + ", ".join(text for loopback, text in sockets if not loopback) + "; all: " + shown)
+elif not all(found.values()):
+    print("NONE " + ", ".join(port for port in ports if not found[port]))
+else:
+    print("OK " + shown)'
+if [[ "$(uname -s)" == Darwin ]]; then
+    listening=$(netstat -anv -p tcp 2>&1 || true)
+else
+    listening=$(ss -Hltnp 2>&1 || true)
+fi
+listening_verdict=$(python3 -I -c "$LISTENING_PY" "$probe_ports" <<<"$listening" 2>&1 || true)
+if [[ "$listening_verdict" == OK* ]]; then
+    pass "only loopback listens on ports ${probe_ports//,/, } (every listening socket here): ${listening_verdict#OK }"
+elif [[ "$listening_verdict" == NONE* ]]; then
+    fail "listening sockets: inconclusive, nothing listens on port(s) ${listening_verdict#NONE } at all"
+else
+    fail "a socket listens on a non-loopback address on ports ${probe_ports//,/, }: ${listening_verdict#FAIL }"
+fi
 # This computer's own addresses other than loopback (IPv4, and IPv6 except
 # link-local): the LAN address first (the source of the route to 1.1.1.1; a UDP
 # connect sends nothing), then every other interface address.
@@ -640,31 +697,125 @@ for candidate in candidates:
         found.append(candidate)
 print(" ".join(found))')
 lan_ip=${host_addresses%% *}
+# Tries a TCP connection to each ADDRESS on each PORT, all at once, and prints
+# "PORT ADDRESS RESULT" for each: refused, timeout (no answer in 3 s),
+# answered (the connection was accepted), or error:<errno name> when it could
+# not be tried (such as ENETUNREACH: no route for that address family). Then
+# "route ADDRESS DEVICE" for each: the interface the container's network
+# routes it through (ip route get), or "?":
+# python -I -c "$PORT_PROBE_PY" PORT,... ADDRESS...
+PORT_PROBE_PY='
+import concurrent.futures, errno, re, socket, subprocess, sys
+ports, addresses = sys.argv[1].split(","), sys.argv[2:]
+def probe(port, address):
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as sock:
+        sock.settimeout(3)
+        try:
+            sock.connect((address, int(port)))
+            return "answered"
+        except ConnectionRefusedError:
+            return "refused"
+        except TimeoutError:
+            return "timeout"
+        except OSError as error:
+            return "error:" + (errno.errorcode.get(error.errno) or type(error).__name__)
+tries = [(port, address) for port in ports for address in addresses]
+with concurrent.futures.ThreadPoolExecutor(max(1, len(tries))) as pool:
+    for (port, address), result in zip(tries, pool.map(lambda t: probe(*t), tries)):
+        print(port, address, result)
+for address in addresses:
+    try:
+        route = subprocess.run(["ip", "route", "get", address], capture_output=True, text=True).stdout
+    except OSError:
+        route = ""
+    device = re.search(r"\bdev (\S+)", route)
+    print("route", address, device[1] if device else "?")'
+# The tries at this computer's own addresses come from a throwaway container,
+# not from a process here: that would be this computer's own connection to a
+# non-loopback address, which a firewall on it (such as Little Snitch) may hold
+# for a person to answer. The container is on Docker's host network: OrbStack's
+# default network has no IPv6, while its host network (that of its Linux VM)
+# reaches the Mac's IPv4 and IPv6 addresses; OrbStack makes each connection
+# again on the Mac, to the Mac's own address (so a firewall here sees it as
+# OrbStack's), and it meets whatever listens there: a listener published on the
+# LAN address and on a global IPv6 address was reached at both. On Linux, the
+# host network is this computer's own.
+probe_results=""
+if [[ -n "$host_addresses" ]]; then
+    read -r -a host_address_list <<<"$host_addresses"
+    probe_results=$(docker run --rm --network host "$PY_IMAGE" \
+        python -I -c "$PORT_PROBE_PY" "$probe_ports" "${host_address_list[@]}" 2>&1) || true
+fi
+# OrbStack gives the Mac an address in each Docker network's subnet (the
+# network's own address, on a bridge interface), and its VM routes that address
+# to a device of its own (.orbmirror1, ...), not to the Mac: a try at it from a
+# container never meets the Mac's sockets (it times out). Such an address is
+# one in a Docker network's subnet (docker network inspect) that the probe's
+# network routes through a .orbmirror device (ip route get). These are left to
+# the listening-socket check above; every other address must refuse.
+docker_subnets=$(docker network ls -q | xargs docker network inspect \
+    --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null || true)
+mirror_addresses=$(python3 -I -c '
+import ipaddress, sys
+output, subnets = sys.argv[1], sys.argv[2].split()
+networks = [ipaddress.ip_network(subnet, strict=False) for subnet in subnets]
+mirrors = []
+for line in output.splitlines():
+    words = line.split()
+    if len(words) == 3 and words[0] == "route" and words[2].startswith(".orbmirror"):
+        address = ipaddress.ip_address(words[1])
+        if any(address.version == n.version and address in n for n in networks):
+            mirrors.append(words[1])
+print(" ".join(mirrors))' "$probe_results" "$docker_subnets" 2>&1 || true)
+if [[ -n "$mirror_addresses" ]]; then
+    echo "      not testable from a container (OrbStack routes them inside its VM): $mirror_addresses; covered by the listening-socket check"
+fi
 # Prints curl's exit code and HTTP status for a URL: probe_url URL
 probe_url() {
     local rc=0 code
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$1" 2>/dev/null) || rc=$?
     echo "$rc $code"
 }
-for web_ui in "Firefox $FIREFOX_URL/ 5800" "qBittorrent $QBT_URL/api/v2/app/version 9080"; do
+for web_ui in "${web_uis[@]}"; do
     read -r ui_name ui_url ui_port <<<"$web_ui"
     local_result=$(probe_url "$ui_url")
-    reached=()
-    for address in $host_addresses; do
-        [[ "$address" == *:* ]] && address="[$address]"
-        result=$(probe_url "${ui_url/localhost:$ui_port/$address:$ui_port}")
-        # curl exit 7: connection refused; 28: timed out. Anything else got an answer.
-        [[ "$result" == "7 000" || "$result" == "28 000" ]] || reached+=("$address ($result)")
-    done
+    # REACHED when any address accepted the connection; else UNSURE when any
+    # but OrbStack's network addresses was not refused, the only result that
+    # shows nothing listens there: a timeout may be a firewall holding or
+    # dropping the try (Little Snitch held one for a person to answer), and an
+    # error means it could not be tried; else "OK <addresses tried>".
+    probe_verdict=$(python3 -I -c '
+import sys
+port, addresses, mirrors, output = sys.argv[1], sys.argv[2].split(), sys.argv[3].split(), sys.argv[4]
+results = {}
+for line in output.splitlines():
+    words = line.split()
+    if len(words) == 3 and words[0] == port:
+        results[words[1]] = words[2]
+tested = [a for a in addresses if a not in mirrors]
+reached = [a for a in addresses if results.get(a) == "answered"]
+unsure = [a + " (" + results.get(a, "no result") + ")" for a in tested
+          if results.get(a) != "refused"]
+if reached:
+    print("REACHED " + " ".join(reached))
+elif not results:
+    print("UNSURE every address; the probe printed: " + ("; ".join(output.splitlines()) or "nothing"))
+elif unsure:
+    print("UNSURE " + " ".join(unsure))
+else:
+    print("OK " + str(len(tested)))' "$ui_port" "$host_addresses" "$mirror_addresses" "$probe_results" 2>&1 || true)
     if [[ -z "$lan_ip" ]]; then
         fail "$ui_name: inconclusive, this computer has no LAN address to test from"
     elif [[ "$local_result" != "0 200" ]]; then
         fail "$ui_name: inconclusive, $ui_url itself does not answer 200 (curl exit and status: $local_result)"
-    elif ((${#reached[@]} > 0)); then
-        fail "$ui_name port $ui_port answers on this computer's non-loopback address(es): ${reached[*]}"
+    elif [[ "$probe_verdict" == REACHED* ]]; then
+        fail "$ui_name port $ui_port answers on this computer's non-loopback address(es), tried from a container: ${probe_verdict#REACHED }"
+    elif [[ "$probe_verdict" != OK* ]]; then
+        fail "$ui_name: inconclusive, port $ui_port was not refused, tried from a container, at: ${probe_verdict#UNSURE }"
     else
-        others=$(($(wc -w <<<"$host_addresses") - 1))
-        pass "$ui_name answers at localhost:$ui_port, not at the LAN address $lan_ip or this computer's $others other non-loopback address(es)"
+        others=$((${probe_verdict#OK } - 1))
+        pass "$ui_name answers at localhost:$ui_port, not at the LAN address $lan_ip or this computer's $others other non-loopback address(es) a container can try (each refused the connection)"
     fi
 done
 
