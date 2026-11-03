@@ -14,24 +14,31 @@
 # goes to a proxy at a closed port (browser.mjs's CLOSED_PROXY), so their own
 # background requests never leave this computer.
 #
-# Then the whole audio path, in each browser: a throwaway container from the
+# Then the whole audio path, in each browser: throwaway containers from the
 # image, started as tests/e2e/run.sh starts them (the service's settings and
-# hardening, WEB_AUDIO included, and no network), shows tests/e2e/audio-page.html;
-# tunnel.py makes its web UI reachable on 127.0.0.1, and web-ui-audio.mjs loads
-# it and checks, at the web UI's own audio output, the first-use and the
+# hardening, WEB_AUDIO included, and no network), show tests/e2e/audio-page.html;
+# tunnel.py makes each one's web UI reachable on 127.0.0.1, and web-ui-audio.mjs
+# loads it and checks, at the web UI's own audio output, the first-use and the
 # returning-user paths, and what a restart of the container (which the same tab
 # reconnects to) does to sound that was on, and to sound that was muted (see
-# that file).
+# that file). The sound-on restart and the muted restart are its two parts, each
+# with its own container, tab and profile, run at the same time; the muted part's
+# waits for sound to stay off are sized from the other part's measured times,
+# which it reads from a file here. Their results print as one.
 #
-# The two browsers' checks run at the same time, each with its own container,
-# tunnel and profiles; their results print in order once both are done.
-#
-# Last, switching windows from the web UI, in each browser: a throwaway container
+# And switching windows from the web UI, in each browser: a throwaway container
 # as above but with private-only browsing off (FIREFOX_PRIVATE_BROWSING=false,
 # whatever .env sets) and showing tests/e2e/blank-page.html, so it can have a
 # normal and a private window; web-ui-windows.mjs opens a private window in it
 # and checks that Ctrl+` typed in the web UI shows the other window (see that
 # file).
+#
+# Every check runs at the same time as the others, as a job of its own (each in
+# a process group of its own, so that cleanup can stop what it started): the
+# local harnesses, the two audio parts and the windows check, in each browser,
+# each with its own container (web-ui-PID-KIND-PART), tunnel, port and
+# profiles. The containers start first, and the local harnesses run while they
+# boot. The results print in order once all are done.
 #
 # Usage: tests/browser/run.sh   (needs docker, python3, node, and Google
 #        Chrome and/or Firefox in /Applications)
@@ -45,10 +52,15 @@ FIREFOX="/Applications/Firefox.app/Contents/MacOS/firefox"
 WORK=$(mktemp -d)
 SERVER_PID=""
 CONTAINER=""
-# Each browser's web UI container is web-ui-PID-KIND (browser_checks sets it).
+# Each job's web UI container is web-ui-PID-KIND-PART (web_ui_job sets it).
 WEB_CONTAINER=""
 TUNNEL_PID=""
-CHECK_PIDS=()
+# The jobs (start_job): each one's name, and its process id, which is also its
+# process group's.
+JOB_NAMES=()
+JOB_PIDS=()
+# The web UI containers the jobs may start.
+WEB_CONTAINERS=()
 # As in tests/e2e/run.sh: the test containers have no network, so a resolver
 # that refuses at once keeps Firefox from waiting out DNS timeouts as it quits
 # (each `docker restart` below quits it).
@@ -60,17 +72,32 @@ stop_web_ui() {
     [[ -z "$WEB_CONTAINER" ]] || docker rm -f -v "$WEB_CONTAINER" >/dev/null 2>&1 || true
 }
 
+# stop_job PID: stops every process in job PID's process group (its node, the
+# browser that started, tunnel.py), and waits up to 5 s for them to end.
+stop_job() {
+    kill -TERM -- "-$1" 2>/dev/null || return 0
+    for _ in $(seq 1 50); do
+        kill -0 -- "-$1" 2>/dev/null || return 0
+        sleep 0.1
+    done
+    kill -KILL -- "-$1" 2>/dev/null || true
+}
+
 cleanup() {
     local pid
-    for pid in ${CHECK_PIDS[@]+"${CHECK_PIDS[@]}"}; do
-        kill "$pid" 2>/dev/null || true
+    for pid in ${JOB_PIDS[@]+"${JOB_PIDS[@]}"}; do
+        stop_job "$pid"
     done
     [[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true
     [[ -n "$CONTAINER" ]] && docker rm -f -v "$CONTAINER" >/dev/null 2>&1 || true
-    docker rm -f -v "web-ui-$$-chrome" "web-ui-$$-firefox" >/dev/null 2>&1 || true
+    if ((${#WEB_CONTAINERS[@]} > 0)); then
+        docker rm -f -v "${WEB_CONTAINERS[@]}" >/dev/null 2>&1 || true
+    fi
     rm -rf "$WORK"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 docker compose -f "$REPO/docker-compose.yml" config --format json >"$WORK/compose.json"
 python3 -I "$REPO/tests/e2e/service_args.py" <"$WORK/compose.json" >"$WORK/service-args"
@@ -89,7 +116,177 @@ while IFS= read -r arg; do
 done < <(tail -n +2 "$WORK/service-args-off")
 echo "noVNC from: $IMAGE"
 
-mkdir -p "$WORK/site/core/util" "$WORK/profiles"
+failures=0
+
+# The firefox service streams its audio (docker-compose.yml); the containers below follow it.
+if [[ " ${SERVICE_ARGS[*]} " != *" WEB_AUDIO=1 "* ]]; then
+    echo "FAIL  the firefox service does not set WEB_AUDIO=1"
+    failures=$((failures + 1))
+fi
+
+# free_ports N: N different free ports on 127.0.0.1, one per line.
+free_ports() {
+    python3 -I -c '
+import socket, sys
+sockets = [socket.socket() for _ in range(int(sys.argv[1]))]
+for s in sockets:
+    s.bind(("127.0.0.1", 0))
+print("\n".join(str(s.getsockname()[1]) for s in sockets))
+' "$1"
+}
+
+# The browsers found, and a port for each job's browser (5 per browser) and the server.
+kinds=()
+binaries=()
+for kind in chrome firefox; do
+    if [[ "$kind" == chrome ]]; then binary=$CHROME; else binary=$FIREFOX; fi
+    [[ -x "$binary" ]] || continue
+    kinds+=("$kind")
+    binaries+=("$binary")
+done
+PORTS=()
+while IFS= read -r port; do
+    PORTS+=("$port")
+done < <(free_ports $((1 + 5 * ${#kinds[@]})))
+mkdir -p "$WORK/profiles" "$WORK/results" "$WORK/logs"
+
+# start_job NAME FUNCTION ARGS...: runs FUNCTION ARGS... in the background, in a
+# subshell in a process group of its own; its output in $WORK/logs/NAME.
+start_job() {
+    local name=$1
+    shift
+    set -m
+    ("$@") >"$WORK/logs/$name" 2>&1 </dev/null &
+    JOB_PIDS+=("$!")
+    set +m
+    JOB_NAMES+=("$name")
+}
+
+in_x() { docker exec -u 1000 -e DISPLAY=:0 "$WEB_CONTAINER" "$@"; }
+
+# start_web_ui PAGE TITLE ARGS...: starts the container with the `docker run`
+# ARGS on tests/e2e/PAGE, waits for Firefox to show it (a window title with
+# TITLE), and starts the tunnel to its web UI; sets WEB_UI_URL. Returns 1 (and
+# prints why) if either does not come up.
+start_web_ui() {
+    local page=$1 title=$2 window="" port=""
+    shift 2
+    stop_web_ui
+    if ! docker run -d --rm --name "$WEB_CONTAINER" --network none "${NO_DNS_ARGS[@]}" \
+        --shm-size 1g "$@" \
+        -e "FF_OPEN_URL=file:///e2e/$page" \
+        -e FF_PREF_NO_DATA_BAR=datareporting.policy.dataSubmissionPolicyBypassNotification=true \
+        -v "$REPO/tests/e2e:/e2e:ro" \
+        "$IMAGE" >/dev/null; then
+        echo "docker run $WEB_CONTAINER failed"
+        return 1
+    fi
+    # Every 0.25 s, for up to 90 s.
+    for _ in $(seq 1 360); do
+        window=$(in_x xdotool search --classname Navigator 2>/dev/null | head -n 1) || true
+        if [[ -n "$window" ]] &&
+            [[ "$(in_x xdotool getwindowname "$window" 2>/dev/null)" == *"$title"* ]]; then
+            break
+        fi
+        window=""
+        sleep 0.25
+    done
+    if [[ -z "$window" ]]; then
+        echo "Firefox never showed $page"
+        return 1
+    fi
+    python3 -I "$BROWSER_DIR/tunnel.py" 0 docker exec -i "$WEB_CONTAINER" nc -N 127.0.0.1 5800 \
+        >"$WORK/tunnel-$WEB_CONTAINER.out" 2>&1 &
+    TUNNEL_PID=$!
+    for _ in $(seq 1 50); do
+        port=$(sed -n 's/^listening on 127\.0\.0\.1:\([0-9]*\)$/\1/p' "$WORK/tunnel-$WEB_CONTAINER.out")
+        [[ -n "$port" ]] && break
+        sleep 0.1
+    done
+    if [[ -z "$port" ]]; then
+        echo "tunnel.py did not start: $(cat "$WORK/tunnel-$WEB_CONTAINER.out")"
+        return 1
+    fi
+    WEB_UI_URL="http://127.0.0.1:$port/"
+}
+
+# The file in which web-ui-audio.mjs's reconnect part, in browser KIND, leaves its
+# measured times for the muted part.
+timings_file() { echo "$WORK/$1-timings.json"; }
+
+# web_ui_job KIND BINARY PORT PART: one web UI check in browser KIND, with the
+# DevTools or WebDriver BiDi port PORT, in a container of its own: PART reconnect
+# or muted is that part of web-ui-audio.mjs, windows is web-ui-windows.mjs. Its
+# result in $WORK/results/KIND-PART. Run as a job.
+web_ui_job() {
+    local kind=$1 binary=$2 port=$3 part=$4 result timings
+    local out="$WORK/results/$kind-$part" start="$WORK/start-$kind-$part.out"
+    timings=$(timings_file "$kind")
+    WEB_CONTAINER="web-ui-$$-$kind-$part"
+    trap stop_web_ui EXIT
+    # Not in $(...): the tunnel and WEB_UI_URL must outlive the call.
+    if [[ "$part" == windows ]]; then
+        start_web_ui blank-page.html "e2e blank page" "${OFF_ARGS[@]}" >"$start" || true
+    else
+        start_web_ui audio-page.html "e2e audio page" "${SERVICE_ARGS[@]}" >"$start" || true
+    fi
+    if [[ -z "${WEB_UI_URL:-}" ]]; then
+        cp "$start" "$out"
+    elif [[ "$part" == windows ]]; then
+        result=$(node "$BROWSER_DIR/web-ui-windows.mjs" "$kind" "$binary" \
+            "$WORK/profiles/$kind-windows" "$port" "$WEB_UI_URL" "$WEB_CONTAINER") || true
+        printf '%s\n' "$result" >"$out"
+    else
+        result=$(node "$BROWSER_DIR/web-ui-audio.mjs" "$kind" "$binary" \
+            "$WORK/profiles/$kind-$part" "$port" "$WEB_UI_URL" "$WEB_CONTAINER" "$part" \
+            "$timings") || true
+        printf '%s\n' "$result" >"$out"
+    fi
+    # The muted part waits for these: if the reconnect part ended without them, say so.
+    if [[ "$part" == reconnect && ! -e "$timings" ]]; then
+        echo '{"error": "the reconnect part ended before it had them"}' >"$timings.tmp"
+        mv "$timings.tmp" "$timings"
+    fi
+    stop_web_ui
+}
+
+# local_harnesses KIND BINARY PORT PORT2: the cursor and the audio harness in
+# browser KIND (Firefox's cursor harness on PORT, the audio harness on PORT2);
+# their results in $WORK/results/KIND-cursor and KIND-audio. Run as a job.
+local_harnesses() {
+    local kind=$1 binary=$2 result
+    if [[ "$kind" == chrome ]]; then
+        # The proxy is browser.mjs's CLOSED_PROXY: Chrome reaches only loopback.
+        result=$("$binary" --headless=new --disable-gpu --no-first-run \
+            --user-data-dir="$WORK/profiles/chrome" --virtual-time-budget=10000 \
+            --proxy-server=127.0.0.1:9 \
+            --dump-dom "$URL" 2>/dev/null | sed -n 's:.*<pre id="result">\(.*\)</pre>.*:\1:p')
+    else
+        result=$(node "$BROWSER_DIR/page-result.mjs" firefox "$binary" "$WORK/profiles/firefox" \
+            "$3" "$URL") || true
+    fi
+    printf '%s\n' "$result" >"$WORK/results/$kind-cursor"
+    result=$(node "$BROWSER_DIR/page-result.mjs" "$kind" "$binary" \
+        "$WORK/profiles/$kind-audio" "$4" "$AUDIO_URL" "$AUDIO_CLICK_TITLE") || true
+    printf '%s\n' "$result" >"$WORK/results/$kind-audio"
+}
+
+# The web UI containers first: they take the longest to come up.
+for i in ${kinds[@]+"${!kinds[@]}"}; do
+    kind=${kinds[$i]}
+    mkdir -p "$WORK/profiles/$kind-reconnect" "$WORK/profiles/$kind-muted" \
+        "$WORK/profiles/$kind-windows"
+    for part in reconnect muted windows; do
+        WEB_CONTAINERS+=("web-ui-$$-$kind-$part")
+    done
+    start_job "$kind-reconnect" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((1 + 5 * i))]}" \
+        reconnect
+    start_job "$kind-muted" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((2 + 5 * i))]}" muted
+    start_job "$kind-windows" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((3 + 5 * i))]}" \
+        windows
+done
+
+mkdir -p "$WORK/site/core/util"
 CONTAINER=$(docker create "$IMAGE")
 docker cp -q "$CONTAINER:/opt/noVNC/core" "$WORK/site/"
 docker cp -q "$CONTAINER:/opt/noVNC/vendor" "$WORK/site/"
@@ -99,7 +296,7 @@ for file in pcm-player.min.js unmute.min.js; do
 done
 # The overlay below replaces the image's cursor.js, and the firefox service also mounts
 # config/novnc/ui.js over the image's app/ui.js and config/firefox-services/kill over its
-# /etc/services.d/app/kill (the throwaway containers below get those mounts too), which would
+# /etc/services.d/app/kill (the throwaway containers above get those mounts too), which would
 # hide any change a new image made to them: first check that the image's files (the ones
 # tests/image_overlays.py lists) are still the ones each NAME.patch was made from, and that
 # each overlay is its file plus its patch (config/cursors/README.md).
@@ -150,11 +347,46 @@ sys.exit(0 if ok else 1)
 ' "$1" "$2"
 }
 
-free_port() {
-    python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])'
+# merged_result RECONNECT MUTED: web-ui-audio.mjs's two parts' results (JSON, or
+# why a part did not run) as one result, their cases in the order of the two
+# parts; {"error"} naming each part that did not finish.
+merged_result() {
+    python3 -I -c '
+import json, sys
+errors, parts = [], []
+for name, text in (("reconnect", sys.argv[1]), ("muted", sys.argv[2])):
+    try:
+        result = json.loads(text)
+    except ValueError:
+        result = None
+    if not isinstance(result, dict):
+        errors.append(name + " part: " + (text.strip() or "no result"))
+        continue
+    parts.append(result)
+    complete = (
+        type(result.get("total")) is int
+        and type(result.get("failed")) is int
+        and isinstance(result.get("failures"), list)
+        and isinstance(result.get("cases"), list)
+    )
+    if not complete:
+        errors.append(name + " part: " + str(result.get("error", "no total")))
+cases = [case for part in parts if isinstance(part.get("cases"), list) for case in part["cases"]]
+if errors:
+    merged = {"error": "; ".join(errors), "cases": cases}
+else:
+    merged = {
+        "total": sum(part["total"] for part in parts),
+        "failed": sum(part["failed"] for part in parts),
+        "failures": [name for part in parts for name in part["failures"]],
+        "cases": cases,
+    }
+# As JSON.stringify writes it (the parts are written so).
+print(json.dumps(merged, separators=(",", ":"), ensure_ascii=False))
+' "$1" "$2"
 }
 
-PORT=$(free_port)
+PORT=${PORTS[0]}
 python3 -I -m http.server "$PORT" --bind 127.0.0.1 --directory "$WORK/site" >/dev/null 2>&1 &
 SERVER_PID=$!
 URL="http://127.0.0.1:$PORT/harness.html"
@@ -164,10 +396,24 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 
-failures=0
-browsers=0
+# The local harnesses, while the containers come up.
+for i in ${kinds[@]+"${!kinds[@]}"}; do
+    kind=${kinds[$i]}
+    mkdir -p "$WORK/profiles/$kind" "$WORK/profiles/$kind-audio"
+    start_job "$kind-harnesses" local_harnesses "$kind" "${binaries[$i]}" \
+        "${PORTS[$((4 + 5 * i))]}" "${PORTS[$((5 + 5 * i))]}"
+done
 
-# web-ui-audio.mjs's and web-ui-windows.mjs's cases.
+versions=()
+for i in ${kinds[@]+"${!kinds[@]}"}; do
+    if [[ "${kinds[$i]}" == chrome ]]; then
+        versions+=("$("${binaries[$i]}" --version | sed 's/ *$//')")
+    else
+        versions+=("$("${binaries[$i]}" --version)")
+    fi
+done
+
+# web-ui-audio.mjs's cases (its two parts together) and web-ui-windows.mjs's.
 WEB_UI_CASES=19
 WINDOWS_CASES=3
 
@@ -181,140 +427,45 @@ report() {
     fi
 }
 
-in_x() { docker exec -u 1000 -e DISPLAY=:0 "$WEB_CONTAINER" "$@"; }
+# result KIND-NAME: a job's result, or nothing if it left none.
+result() { cat "$WORK/results/$1" 2>/dev/null || true; }
 
-# start_web_ui PAGE TITLE ARGS...: starts the container with the `docker run`
-# ARGS on tests/e2e/PAGE, waits for Firefox to show it (a window title with
-# TITLE), and starts the tunnel to its web UI; sets WEB_UI_URL. Returns 1 (and
-# prints why) if either does not come up.
-start_web_ui() {
-    local page=$1 title=$2 window="" port=""
-    shift 2
-    stop_web_ui
-    docker run -d --rm --name "$WEB_CONTAINER" --network none "${NO_DNS_ARGS[@]}" \
-        --shm-size 1g "$@" \
-        -e "FF_OPEN_URL=file:///e2e/$page" \
-        -e FF_PREF_NO_DATA_BAR=datareporting.policy.dataSubmissionPolicyBypassNotification=true \
-        -v "$REPO/tests/e2e:/e2e:ro" \
-        "$IMAGE" >/dev/null
-    for _ in $(seq 1 90); do
-        window=$(in_x xdotool search --classname Navigator 2>/dev/null | head -n 1) || true
-        if [[ -n "$window" ]] &&
-            [[ "$(in_x xdotool getwindowname "$window" 2>/dev/null)" == *"$title"* ]]; then
-            break
+# Each job, in the order started; a job that did not end well is a failure.
+for i in ${JOB_PIDS[@]+"${!JOB_PIDS[@]}"}; do
+    status=0
+    wait "${JOB_PIDS[$i]}" || status=$?
+    # Anything of it still running (it should have stopped all it started).
+    stop_job "${JOB_PIDS[$i]}"
+    if ((status != 0)); then
+        echo "FAIL  job ${JOB_NAMES[$i]} exited with status $status"
+        failures=$((failures + 1))
+    fi
+done
+JOB_PIDS=()
+
+for i in ${kinds[@]+"${!kinds[@]}"}; do
+    kind=${kinds[$i]}
+    version=${versions[$i]}
+    report "$version cursor" "$(result "$kind-cursor")" "$EXPECTED"
+    report "$version audio" "$(result "$kind-audio")" "$AUDIO_CASES"
+    report "$version web UI" \
+        "$(merged_result "$(result "$kind-reconnect")" "$(result "$kind-muted")")" \
+        "$WEB_UI_CASES"
+    report "$version windows" "$(result "$kind-windows")" "$WINDOWS_CASES"
+    # What the jobs printed besides their results (errors from the tools they ran).
+    for job in harnesses reconnect muted windows; do
+        if [[ -s "$WORK/logs/$kind-$job" ]]; then
+            echo "      $kind-$job output:"
+            sed 's/^/      /' "$WORK/logs/$kind-$job"
         fi
-        window=""
-        sleep 1
     done
-    if [[ -z "$window" ]]; then
-        echo "Firefox never showed $page"
-        return 1
-    fi
-    python3 -I "$BROWSER_DIR/tunnel.py" 0 docker exec -i "$WEB_CONTAINER" nc -N 127.0.0.1 5800 \
-        >"$WORK/tunnel-$WEB_CONTAINER.out" 2>&1 &
-    TUNNEL_PID=$!
-    for _ in $(seq 1 50); do
-        port=$(sed -n 's/^listening on 127\.0\.0\.1:\([0-9]*\)$/\1/p' "$WORK/tunnel-$WEB_CONTAINER.out")
-        [[ -n "$port" ]] && break
-        sleep 0.1
-    done
-    if [[ -z "$port" ]]; then
-        echo "tunnel.py did not start: $(cat "$WORK/tunnel-$WEB_CONTAINER.out")"
-        return 1
-    fi
-    WEB_UI_URL="http://127.0.0.1:$port/"
-}
-
-# web_ui_audio KIND BINARY LABEL: the whole audio path in browser KIND.
-web_ui_audio() {
-    local result
-    # Not in $(...): the tunnel and WEB_UI_URL must outlive the call.
-    if ! start_web_ui audio-page.html "e2e audio page" "${SERVICE_ARGS[@]}" >"$WORK/start-$1.out"; then
-        report "$3 web UI" "$(cat "$WORK/start-$1.out")" "$WEB_UI_CASES"
-        stop_web_ui
-        return
-    fi
-    result=$(node "$BROWSER_DIR/web-ui-audio.mjs" "$1" "$2" "$WORK/profiles/$1-web-ui" \
-        "$(free_port)" "$WEB_UI_URL" "$WEB_CONTAINER") || true
-    report "$3 web UI" "$result" "$WEB_UI_CASES"
-    stop_web_ui
-}
-
-# web_ui_windows KIND BINARY LABEL: switching windows from the web UI in browser KIND.
-web_ui_windows() {
-    local result
-    if ! start_web_ui blank-page.html "e2e blank page" "${OFF_ARGS[@]}" >"$WORK/start-$1.out"; then
-        report "$3 windows" "$(cat "$WORK/start-$1.out")" "$WINDOWS_CASES"
-        stop_web_ui
-        return
-    fi
-    result=$(node "$BROWSER_DIR/web-ui-windows.mjs" "$1" "$2" "$WORK/profiles/$1-windows" \
-        "$(free_port)" "$WEB_UI_URL" "$WEB_CONTAINER") || true
-    report "$3 windows" "$result" "$WINDOWS_CASES"
-    stop_web_ui
-}
-
-# The firefox service streams its audio (docker-compose.yml); the container below follows it.
-if [[ " ${SERVICE_ARGS[*]} " != *" WEB_AUDIO=1 "* ]]; then
-    echo "FAIL  the firefox service does not set WEB_AUDIO=1"
-    failures=$((failures + 1))
-fi
-
-# browser_checks KIND BINARY: every check in browser KIND (chrome or firefox),
-# in its own web UI container; exits 1 if any failed. Run in a subshell.
-browser_checks() {
-    local kind=$1 binary=$2 version result
-    WEB_CONTAINER="web-ui-$$-$kind"
-    trap stop_web_ui EXIT
-    failures=0
-    if [[ "$kind" == chrome ]]; then
-        version=$("$binary" --version | sed 's/ *$//')
-        # The proxy is browser.mjs's CLOSED_PROXY: Chrome reaches only loopback.
-        result=$("$binary" --headless=new --disable-gpu --no-first-run \
-            --user-data-dir="$WORK/profiles/chrome" --virtual-time-budget=10000 \
-            --proxy-server=127.0.0.1:9 \
-            --dump-dom "$URL" 2>/dev/null | sed -n 's:.*<pre id="result">\(.*\)</pre>.*:\1:p')
-        report "$version cursor" "$result" "$EXPECTED"
-        result=$(node "$BROWSER_DIR/page-result.mjs" chrome "$binary" \
-            "$WORK/profiles/chrome-audio" "$(free_port)" "$AUDIO_URL" "$AUDIO_CLICK_TITLE") || true
-        report "$version audio" "$result" "$AUDIO_CASES"
-    else
-        version=$("$binary" --version)
-        mkdir -p "$WORK/profiles/firefox" "$WORK/profiles/firefox-audio" \
-            "$WORK/profiles/firefox-web-ui" "$WORK/profiles/firefox-windows"
-        result=$(node "$BROWSER_DIR/page-result.mjs" firefox "$binary" "$WORK/profiles/firefox" \
-            "$(free_port)" "$URL") || true
-        report "$version cursor" "$result" "$EXPECTED"
-        result=$(node "$BROWSER_DIR/page-result.mjs" firefox "$binary" \
-            "$WORK/profiles/firefox-audio" "$(free_port)" "$AUDIO_URL" "$AUDIO_CLICK_TITLE") ||
-            true
-        report "$version audio" "$result" "$AUDIO_CASES"
-    fi
-    web_ui_audio "$kind" "$binary" "$version"
-    web_ui_windows "$kind" "$binary" "$version"
-    ((failures == 0))
-}
-
-kinds=()
-for kind in chrome firefox; do
-    if [[ "$kind" == chrome ]]; then binary=$CHROME; else binary=$FIREFOX; fi
-    [[ -x "$binary" ]] || continue
-    browsers=$((browsers + 1))
-    (browser_checks "$kind" "$binary") >"$WORK/$kind.out" 2>&1 &
-    CHECK_PIDS+=("$!")
-    kinds+=("$kind")
 done
-for i in "${!kinds[@]}"; do
-    wait "${CHECK_PIDS[$i]}" || failures=$((failures + 1))
-    cat "$WORK/${kinds[$i]}.out"
-done
-CHECK_PIDS=()
 
-if ((browsers == 0)); then
+if ((${#kinds[@]} == 0)); then
     echo "FAIL  no browser found (looked for $CHROME and $FIREFOX)"
     exit 1
 fi
 if ((failures > 0)); then
     exit 1
 fi
-echo "browser checks passed in $browsers browser(s)"
+echo "browser checks passed in ${#kinds[@]} browser(s)"

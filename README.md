@@ -488,10 +488,12 @@ tests/e2e/run.sh       # Firefox in throwaway containers: cursors, single window
                        # runs only scenarios 7 and 8 (`... 5` all of 5's shards,
                        # `... 10c` one)
 tests/browser/run.sh   # the web UI in headless Chrome and Firefox: the patched noVNC cursor,
-                       # the audio player, and sound through the real web UI of a throwaway
-                       # container, also across a restart of it; Ctrl+` through the web UI
-                       # switching that container's Firefox windows. The browsers reach only
-                       # loopback: anything else goes to a proxy at a closed port
+                       # the audio player, and sound through the real web UI of throwaway
+                       # containers, also across a restart of one with sound on and of one
+                       # with it muted; Ctrl+` through the web UI switching such a
+                       # container's Firefox windows; its checks run at the same time. The
+                       # browsers reach only loopback: anything else goes to a proxy at a
+                       # closed port
 tests/stack/recovery.sh        # DISRUPTIVE: restarts the VPN container and times the recovery
 tests/stack/daemon-restart.sh --yes-restart-docker  # VERY DISRUPTIVE: restarts the Docker
                                                     # engine, so every container on this host:

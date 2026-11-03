@@ -18,25 +18,38 @@
 // restarts it, or Gluetun with it) and the same tab, never reloaded, reconnects on its own.
 // With no click in the tab, audio must come back on (the stream open, the speaker icon on) and
 // the tone, started this time from inside the container (xdotool), must play again. Muted:
-// after the speaker icon mutes audio, another restart and reconnect must leave it off, and
-// the tone must stay silent.
+// after the speaker icon mutes audio that it turned on, a restart and reconnect must leave it
+// off, and the tone must stay silent.
+//
+// The two restarts run at the same time, in two runs of this script, each with its own
+// container, tab and profile. PART reconnect does first use, returning and the reconnect
+// case. PART muted turns audio on with the speaker icon as on first use (first use's checks
+// are the other part's), then does the muted case; its waits for sound to stay off are sized
+// from what the reconnect case measured, which the reconnect part writes to TIMINGS (JSON:
+// {"reopenMs", "toneMs"}) and the muted part reads from it. In the muted case the tone starts
+// in the container as soon as the tab has reconnected, and both waits run at the same time,
+// each as long as it would be alone.
 //
 // Prints {"total", "failed", "failures", "cases"}, or {"error"} if the run could not finish.
 // Usage: node web-ui-audio.mjs chrome|firefox BINARY PROFILE_DIR PORT URL CONTAINER
+//            reconnect|muted TIMINGS
 
 import { execFile } from 'node:child_process';
+import { readFile, rename, writeFile } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 
 import { launch, waitFor } from './browser.mjs';
 
-const [kind, binary, profile, port, url, container] = process.argv.slice(2);
+const [kind, binary, profile, port, url, container, part, timingsFile] = process.argv.slice(2);
 const run = promisify(execFile);
 const LEFT_HZ = 1000;
 const RIGHT_HZ = 1500;
 // The page's tone (amplitude 0.25) at the volume the speaker icon restores (90 %).
 const EXPECTED_RMS = 0.25 * 0.9 / Math.SQRT2;
 const AUDIO_PATH = 'websockify-audio';
+// How long the muted part waits for the reconnect part's timings.
+const TIMINGS_TIMEOUT_MS = 600000;
 
 // Runs in every document before the web UI's scripts (it is passed as source text).
 function tapAudio() {
@@ -162,6 +175,24 @@ function isSilent(measured) {
 // reconnect case took to see it come on, at least 5 s, at most the 15 s that case had.
 function negativeWaitMs(positiveMs) {
     return Math.min(15000, Math.max(5000, 3 * positiveMs));
+}
+
+// Polls PROBE() every INTERVAL_MS until STOP(value) holds, or until WAIT_MS after START, where
+// WAIT_MS is a promise of a length: until it resolves, the wait goes on. The last value.
+async function watchUntil(probe, stop, start, waitMs, intervalMs) {
+    let deadline = Infinity;
+    let failed = null;
+    waitMs.then(ms => { deadline = start + ms; }, err => { failed = err; });
+    for (;;) {
+        const value = await probe();
+        if (failed) {
+            throw failed;
+        }
+        if (stop(value) || Date.now() > deadline) {
+            return value;
+        }
+        await sleep(intervalMs);
+    }
 }
 
 async function measureUntil(session, test, timeoutMs) {
@@ -319,9 +350,38 @@ async function muteWithSpeakerIcon(session) {
     await setPanel(session, false);
 }
 
-async function main(session) {
-    await session.addPreloadScript(tapAudio.toString());
+// Hands the reconnect case's timings to the muted part (written whole, then renamed).
+async function writeTimings(timings) {
+    await writeFile(`${timingsFile}.tmp`, `${JSON.stringify(timings)}\n`);
+    await rename(`${timingsFile}.tmp`, timingsFile);
+}
 
+// The reconnect case's timings, once the reconnect part has written them; rejects if that part
+// wrote {"error"} instead (run.sh does, if it ended without them) or after TIMINGS_TIMEOUT_MS.
+async function reconnectTimings() {
+    const deadline = Date.now() + TIMINGS_TIMEOUT_MS;
+    for (;;) {
+        let timings = null;
+        try {
+            timings = JSON.parse(await readFile(timingsFile, 'utf8'));
+        } catch {
+            // Not written yet.
+        }
+        if (timings?.error) {
+            throw new Error(`the reconnect case's timings: ${timings.error}`);
+        }
+        if (Number.isFinite(timings?.reopenMs) && Number.isFinite(timings?.toneMs)) {
+            return timings;
+        }
+        if (Date.now() > deadline) {
+            throw new Error(`the reconnect case's timings: not in ${timingsFile} within ` +
+                `${TIMINGS_TIMEOUT_MS} ms`);
+        }
+        await sleep(250);
+    }
+}
+
+async function reconnectPart(session) {
     // First use.
     await connected(session);
     record('audio controls shown', await session.evaluate(
@@ -388,10 +448,11 @@ async function main(session) {
     measured = await measureUntil(session, isSilent, 5000);
     record('reconnect: silence before the page plays again', isSilent(measured),
         rounded(measured));
-    let playing = await clickInContainer(true);
+    const playing = await clickInContainer(true);
     started = Date.now();
     measured = await measureUntil(session, isTone, 15000);
     const toneMs = Date.now() - started;
+    await writeTimings({ reopenMs, toneMs });
     state = await session.evaluate(STATE);
     record('reconnect: the page\'s tone plays again with no click in the tab',
         playing && isTone(measured), {
@@ -402,6 +463,20 @@ async function main(session) {
     measured = await measureUntil(session, isSilent, 10000);
     record('reconnect: silence after the page stops', stopped && isSilent(measured),
         { stopped, ...rounded(measured) });
+}
+
+async function mutedPart(session) {
+    // Audio on, as on first use (whose checks the reconnect part records): from the side
+    // panel closed, open it and click the speaker icon.
+    await connected(session);
+    await panelSettled(session, false);
+    await setPanel(session, true);
+    await clickElement(session, '#noVNC_audio_button');
+    await waitFor(session, AUDIO_ON, 'the audio stream opening', 15000);
+    let state = await session.evaluate(STATE);
+    if (!(state.enabled === '1' && audioOn(state))) {
+        throw new Error(`the speaker icon did not turn audio on: ${JSON.stringify(state)}`);
+    }
 
     // Muted: the speaker icon turns audio off before another restart; it must stay off.
     await muteWithSpeakerIcon(session);
@@ -409,19 +484,47 @@ async function main(session) {
     record('muted: the speaker icon mutes audio before the restart', mutedState(state), state);
     record('muted: the same tab reconnects after the container restarts',
         await restartContainer(session), {});
-    // Long enough for audio to have come back on, as it did in the reconnect case: it must not.
-    const reopenWaitMs = negativeWaitMs(reopenMs);
-    await waitFor(session, AUDIO_ON, 'the audio stream reopening', reopenWaitMs).catch(() => {});
-    state = await session.evaluate(STATE);
-    record('muted: audio stays off after the reconnect', mutedState(state),
-        { ...state, waitedMs: reopenWaitMs, reconnectCaseMs: reopenMs });
-    playing = await clickInContainer(true);
-    // Long enough for the tone to have played, as in the reconnect case; any sound fails it.
-    const toneWaitMs = negativeWaitMs(toneMs);
-    measured = await measureUntil(session, m => !isSilent(m), toneWaitMs);
-    record('muted: the page\'s tone stays silent', playing && isSilent(measured),
-        { playing, ...rounded(measured), waitedMs: toneWaitMs, reconnectCaseMs: toneMs });
+    const reconnected = Date.now();
+    const timings = reconnectTimings();
+    // Handled by the waits below (an unhandled rejection would end the run first).
+    timings.catch(() => {});
+    const [reopen, tone] = await Promise.all([
+        // Long enough for audio to have come back on, as it did in the reconnect case: it must
+        // not.
+        (async () => {
+            await watchUntil(() => session.evaluate(AUDIO_ON), on => on, reconnected,
+                timings.then(t => negativeWaitMs(t.reopenMs)), 200);
+            return session.evaluate(STATE);
+        })(),
+        // The tone, started in the container now: long enough for it to have played, as in
+        // the reconnect case; any sound fails it.
+        (async () => {
+            const playing = await clickInContainer(true);
+            const measured = await watchUntil(
+                () => session.evaluate(`window.__measure(${LEFT_HZ}, ${RIGHT_HZ})`),
+                m => !isSilent(m), Date.now(), timings.then(t => negativeWaitMs(t.toneMs)), 250);
+            return { playing, measured };
+        })(),
+    ]);
+    const { reopenMs, toneMs } = await timings;
+    record('muted: audio stays off after the reconnect', mutedState(reopen),
+        { ...reopen, waitedMs: negativeWaitMs(reopenMs), reconnectCaseMs: reopenMs });
+    record('muted: the page\'s tone stays silent', tone.playing && isSilent(tone.measured), {
+        playing: tone.playing, ...rounded(tone.measured), waitedMs: negativeWaitMs(toneMs),
+        reconnectCaseMs: toneMs,
+    });
     await clickInContainer(false);
+}
+
+async function main(session) {
+    await session.addPreloadScript(tapAudio.toString());
+    if (part === 'reconnect') {
+        await reconnectPart(session);
+    } else if (part === 'muted') {
+        await mutedPart(session);
+    } else {
+        throw new Error(`unknown part ${part}: reconnect or muted`);
+    }
 }
 
 let session;
