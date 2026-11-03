@@ -114,13 +114,14 @@ image changed in that file. For each, three files in the overlay's directory
   (mode 0755; a unit test checks this).
 
 `tests/browser/run.sh` and `tests/e2e/run.sh` copy the image's own files (at
-the paths `python3 -I tests/image_overlays.py --paths` prints) out of a
-container that is never started (no mount covers them) and stop with a `FAIL`
-line if a checksum is not the recorded one, or if a patch does not turn its
-file into the overlay exactly (`tests/image_overlays.py`). The unit tests check
-the second part without the image: taking each patch back out of its overlay
-must give a file with the recorded checksum. So no overlay can be edited
-without updating its patch.
+the paths `python3 -I tests/image_overlays.py --paths` prints: the whole
+`/etc/services.d`, and the noVNC files) out of a container that is never
+started (no mount covers them) and stop with a `FAIL` line if a checksum is not
+the recorded one, or if a patch does not turn its file into the overlay exactly
+(`tests/image_overlays.py`), or if the image's xrdb service is not the one
+`xrdb-sync` is added to (below). The unit tests check the second part without
+the image: taking each patch back out of its overlay must give a file with the
+recorded checksum. So no overlay can be edited without updating its patch.
 
 If a new image's file changed, re-apply the patch to it, review the result, and
 record the new file. From the repository root, after changing the image in
@@ -152,3 +153,24 @@ python3 -m unittest discover -s tests && tests/browser/run.sh && tests/e2e/run.s
 (`diff` exits 1 when the files differ, which they do.) noVNC is licensed under
 the Mozilla Public License 2.0: `config/novnc/cursor.js`, `config/novnc/ui.js`
 and their patches stay under it, as the files' headers say.
+
+### A file added to the image: xrdb-sync
+
+The firefox service also mounts `config/firefox-services/xrdb-sync` at
+`/etc/services.d/xrdb/sync`, a file the image does not have. It turns on the
+`sync` flag of the image's `xrdb` service (which loads the X resources and
+exits within milliseconds): the supervisor, cinit, then waits for `xrdb` to
+exit before it starts Firefox, instead of checking once, right after starting
+it, that it is still running, and stopping the container when it has already
+exited (`docker-compose.yml` says more). cinit reads the file as a boolean (`1`
+here); it must not be executable, or cinit runs it and reads its output.
+
+There is no image file to patch, so there is no checksum or patch. Instead the
+same check stops with a `FAIL` line if the image has no
+`/etc/services.d/xrdb/run` (the service was renamed or removed: with no
+`/etc/services.d/xrdb` at all, Docker would create one holding only `sync`), or
+if it has a `/etc/services.d/xrdb/sync` of its own, which the mount would hide.
+In either case, look at the new image's service directory, then move or remove
+the mount in `docker-compose.yml` (and its entry in `ADDITIONS` in
+`tests/image_overlays.py`), or drop the mount if the image's own `sync` already
+does the same.

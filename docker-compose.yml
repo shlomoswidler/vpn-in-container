@@ -223,6 +223,16 @@ services:
       # config/firefox-services/kill.patch; the browser and e2e tests fail if the image's own
       # file is no longer the one recorded (config/cursors/README.md).
       - ./config/firefox-services/kill:/etc/services.d/app/kill:ro
+      # Start race fix: the image's xrdb service loads its X resources and exits within
+      # milliseconds, and its supervisor (cinit) checks once, right after starting it, that it
+      # is still running; when it has already exited, cinit counts a failed start and stops the
+      # container (measured: about once in 210 starts, with 21 starting at once). With sync
+      # (a boolean read from the file; 1 is true), cinit waits for xrdb to exit before starting
+      # Firefox, and fails the start only on a non-zero exit. Not executable: cinit would run
+      # it and read its output. A file of the repo's own, added to the image's service; the
+      # browser and e2e tests fail if the image no longer has the xrdb service, or has a sync
+      # file of its own (tests/image_overlays.py).
+      - ./config/firefox-services/xrdb-sync:/etc/services.d/xrdb/sync:ro
       # Refuses a FIREFOX_PRIVATE_BROWSING other than true or false (see FF_PREF_PRIVATE_BROWSING)
       - ./config/firefox-init.d/54-firefox-private-browsing.sh:/etc/cont-init.d/54-firefox-private-browsing.sh:ro
       # Removes Openbox's 1px top border, whose unthemed cursor shows along the top edge

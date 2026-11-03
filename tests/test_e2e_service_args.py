@@ -65,6 +65,7 @@ class ServiceArgsTests(unittest.TestCase):
                 {"source": "/r/cursors", "target": "/usr/share/icons/x", "read_only": True},
                 {"source": "/r/init.sh", "target": "/etc/cont-init.d/57.sh", "read_only": True},
                 {"source": "/r/kill", "target": "/etc/services.d/app/kill", "read_only": True},
+                {"source": "/r/sync", "target": "/etc/services.d/xrdb/sync", "read_only": True},
                 {"source": "/r/run", "target": "/etc/services.d/app/run"},
                 {"source": "/r/config", "target": "/config"},
                 {"source": "/r/other", "target": "/srv/other", "read_only": True},
@@ -76,6 +77,7 @@ class ServiceArgsTests(unittest.TestCase):
                 "/r/cursors:/usr/share/icons/x:ro",
                 "/r/init.sh:/etc/cont-init.d/57.sh:ro",
                 "/r/kill:/etc/services.d/app/kill:ro",
+                "/r/sync:/etc/services.d/xrdb/sync:ro",
             ],
         )
 

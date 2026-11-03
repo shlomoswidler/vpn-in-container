@@ -7,13 +7,16 @@ config/firefox-services/kill its /etc/services.d/app/kill plus
 config/firefox-services/kill.patch. The repo does not hold the image's files, only their
 checksums (NAME.upstream.sha256): each original is rebuilt here by taking the patch back out of
 its overlay. tests/browser/run.sh and tests/e2e/run.sh check the image's own files against the
-same checksums.
+same checksums. They also check, for each file of the repo's own added to an image directory
+(config/firefox-services/xrdb-sync at /etc/services.d/xrdb/sync), that the image has the
+service it is added to and no such file of its own.
 Run: python3 -m unittest discover -s tests
 """
 
 import hashlib
 import importlib.util
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -63,6 +66,7 @@ def overlay_named(name: str):
 
 UI = overlay_named("ui.js")
 KILL = overlay_named("kill")
+XRDB_SYNC = next(addition for addition in overlays.ADDITIONS if addition.name == "xrdb-sync")
 
 
 def original(overlay) -> bytes:
@@ -197,6 +201,57 @@ class OverlayTableTests(unittest.TestCase):
             overlays.copied_path(root, KILL), Path("/some/root/etc/services.d/app/kill")
         )
         self.assertEqual(overlays.copied_path(root, UI), Path("/some/root/opt/noVNC/app/ui.js"))
+
+
+class AdditionTableTests(unittest.TestCase):
+    def test_every_addition_is_listed_with_the_file_it_needs(self):
+        self.assertEqual(
+            [tuple(addition) for addition in overlays.ADDITIONS],
+            [
+                (
+                    "config/firefox-services",
+                    "xrdb-sync",
+                    "/etc/services.d/xrdb/sync",
+                    "/etc/services.d/xrdb/run",
+                ),
+            ],
+        )
+        self.assertEqual(XRDB_SYNC.path, REPO_ROOT / "config" / "firefox-services" / "xrdb-sync")
+        self.assertTrue(XRDB_SYNC.path.is_file())
+
+    def test_each_addition_is_in_a_directory_copied_out_whole(self):
+        # Only then does a file missing from the copy mean one missing from the image.
+        for addition in overlays.ADDITIONS:
+            for path in (addition.target, addition.required):
+                with self.subTest(path=path):
+                    self.assertTrue(any(overlays.in_dir(path, d) for d in overlays.COPIED_DIRS))
+            with self.subTest(addition=addition.name):
+                # The same service directory.
+                self.assertEqual(Path(addition.target).parent, Path(addition.required).parent)
+
+    def test_in_dir_needs_a_whole_path_component(self):
+        self.assertTrue(overlays.in_dir("/etc/services.d/xrdb/run", "/etc/services.d"))
+        self.assertTrue(overlays.in_dir("/etc/services.d/xrdb/run", "/etc/services.d/"))
+        self.assertFalse(overlays.in_dir("/etc/services.dx/run", "/etc/services.d"))
+        self.assertFalse(overlays.in_dir("/etc/services.d", "/etc/services.d"))
+
+    def test_the_paths_to_copy_cover_every_overlay_and_none_is_inside_another(self):
+        # `docker cp` of a directory onto one a file copied before it created would copy it
+        # inside that one (IMAGE_ROOT/etc/services.d/services.d).
+        paths = overlays.image_paths()
+        self.assertEqual(
+            paths, ["/etc/services.d", "/opt/noVNC/core/util/cursor.js", "/opt/noVNC/app/ui.js"]
+        )
+        for path in paths:
+            for other in paths:
+                with self.subTest(path=path, other=other):
+                    self.assertFalse(overlays.in_dir(path, other))
+        for overlay in overlays.OVERLAYS:
+            with self.subTest(overlay=overlay.name):
+                self.assertTrue(
+                    overlay.target in paths
+                    or any(overlays.in_dir(overlay.target, path) for path in paths)
+                )
 
 
 class CommittedOverlayTests(unittest.TestCase):
@@ -355,6 +410,13 @@ class CommandLineTests(unittest.TestCase):
             path = self.image_root / overlay.target.lstrip("/")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
+        # The image's xrdb service, as `docker cp` copies it: run is a symbolic link to a file
+        # outside the copy.
+        xrdb = self.image_root / "etc" / "services.d" / "xrdb"
+        xrdb.mkdir(parents=True, exist_ok=True)
+        (xrdb / "run").symlink_to("/opt/base/bin/xrdb")
+        (xrdb / "params").write_text("/opt/base/etc/Xresources\n")
+        (xrdb / "xvnc.dep").write_bytes(b"")
 
     def run_check(self, *args: str) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -366,9 +428,11 @@ class CommandLineTests(unittest.TestCase):
         result = self.run_check("--paths")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
+        # The image's services directory whole (kill is in it, and the xrdb service the
+        # addition is checked against), then the noVNC overlays.
         self.assertEqual(
             result.stdout,
-            "/opt/noVNC/core/util/cursor.js\n/opt/noVNC/app/ui.js\n/etc/services.d/app/kill\n",
+            "/etc/services.d\n/opt/noVNC/core/util/cursor.js\n/opt/noVNC/app/ui.js\n",
         )
 
     def test_the_recorded_originals_pass(self):
@@ -381,6 +445,53 @@ class CommandLineTests(unittest.TestCase):
             with self.subTest(overlay=overlay.name):
                 self.assertIn(f"ok    the image's {overlay.target}", result.stdout)
                 self.assertIn(overlays.recorded_sha256(overlay), result.stdout)
+        self.assertIn(
+            "ok    the image has /etc/services.d/xrdb/run and no /etc/services.d/xrdb/sync, "
+            "which config/firefox-services/xrdb-sync adds",
+            result.stdout,
+        )
+
+    def test_an_image_with_its_own_xrdb_sync_fails(self):
+        # The mount would hide the image's own file.
+        self.write_image_files()
+        (self.image_root / "etc" / "services.d" / "xrdb" / "sync").write_text("0\n")
+        result = self.run_check(str(self.image_root))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAIL  the image has its own /etc/services.d/xrdb/sync", result.stderr)
+        self.assertIn("config/firefox-services/xrdb-sync", result.stderr)
+        self.assertIn("config/cursors/README.md", result.stderr)
+        self.assertNotIn("FAIL  the image has no", result.stderr)
+        # The overlays are still checked, and pass.
+        self.assertIn("ok    the image's /etc/services.d/app/kill", result.stdout)
+
+    def test_an_image_with_its_own_xrdb_sync_link_fails(self):
+        # Even a symbolic link that leads nowhere in the copy.
+        self.write_image_files()
+        sync = self.image_root / "etc" / "services.d" / "xrdb" / "sync"
+        sync.symlink_to("/defaults/service/sync")
+        result = self.run_check(str(self.image_root))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAIL  the image has its own /etc/services.d/xrdb/sync", result.stderr)
+
+    def test_an_image_without_xrdb_run_fails(self):
+        # A renamed or removed service: the mount would make a stray directory, or a service
+        # without its program.
+        self.write_image_files()
+        (self.image_root / "etc" / "services.d" / "xrdb" / "run").unlink()
+        result = self.run_check(str(self.image_root))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAIL  the image has no /etc/services.d/xrdb/run", result.stderr)
+        self.assertIn("mounted at /etc/services.d/xrdb/sync", result.stderr)
+        self.assertNotIn("its own /etc/services.d/xrdb/sync", result.stderr)
+
+    def test_an_image_without_the_xrdb_service_fails(self):
+        self.write_image_files()
+        shutil.rmtree(self.image_root / "etc" / "services.d" / "xrdb")
+        result = self.run_check(str(self.image_root))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("FAIL  the image has no /etc/services.d/xrdb/run", result.stderr)
+        self.assertIn("Docker creates one holding only that file", result.stderr)
+        self.assertIn("ok    the image's /etc/services.d/app/kill", result.stdout)
 
     def test_a_changed_cursor_js_fails(self):
         self.write_image_files({"cursor.js": (b"_position", b"_where")})
@@ -429,6 +540,7 @@ class CommandLineTests(unittest.TestCase):
         result = self.run_check(str(self.image_root))
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stderr.count("FAIL  cannot read the image's "), 3)
+        self.assertIn("FAIL  the image has no /etc/services.d/xrdb/run", result.stderr)
 
     def test_usage(self):
         for args in ((), (str(self.image_root), "--paths")):

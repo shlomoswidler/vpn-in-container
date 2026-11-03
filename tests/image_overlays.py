@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that each overlay is the firefox image's file plus its patch.
+"""Check that each overlay is the firefox image's file plus its patch, and each addition fits.
 
 The firefox service mounts patched copies of some of its image's files over the image's own
 ("overlays"): config/novnc/cursor.js over /opt/noVNC/core/util/cursor.js, config/novnc/ui.js
@@ -8,21 +8,33 @@ image's version of any of them would be hidden, with its fixes. For each overlay
 repo directory, NAME.upstream.sha256 records the checksum of the image file the overlay was made
 from, and NAME.patch the change (`diff -u` output).
 
+It also mounts files of the repo's own as new files in an image directory ("additions"):
+config/firefox-services/xrdb-sync at /etc/services.d/xrdb/sync, the `sync` flag of the image's
+xrdb service. Such a file needs the image's directory to be the one it was made for: if the
+image no longer had the xrdb service, Docker would create a stray /etc/services.d/xrdb holding
+only `sync`, and if the image had a `sync` file of its own, the mount would hide it. So the
+image must have each addition's REQUIRED file (/etc/services.d/xrdb/run) and must not have its
+target. Directories that hold an addition (COPIED_DIRS) are copied out whole, so a file missing
+from the copy is missing from the image.
+
 Given IMAGE_ROOT, a directory holding the image's files at their absolute paths (for example
 IMAGE_ROOT/opt/noVNC/app/ui.js, copied out of the image with `docker create` and `docker cp`),
-this exits 0 if each has the recorded checksum and its patch turns it into the overlay;
-otherwise it says which and exits 1. A patch is applied strictly: every hunk must match exactly
-where it says, with no offset and no fuzz (unlike `patch`). With --paths, it prints the image
-path of each overlay, one per line, for the scripts that copy those files out of the image.
-The unit tests (tests/test_image_overlays.py) check the overlays without the image's files, by
-taking each patch back out of its overlay. config/cursors/README.md says how to update the
-three files of an overlay.
+this exits 0 if each has the recorded checksum and its patch turns it into the overlay, and
+each addition's directory is as above; otherwise it says which and exits 1. A patch is applied
+strictly: every hunk must match exactly where it says, with no offset and no fuzz (unlike
+`patch`). With --paths, it prints the image paths to copy out, one per line, for the scripts
+that copy them out of the image: each directory of COPIED_DIRS, and each overlay's file that is
+not in one of them. The unit tests (tests/test_image_overlays.py) check the overlays without the
+image's files, by taking each patch back out of its overlay. config/cursors/README.md says how
+to update the three files of an overlay, and what to do when the image's directory for an
+addition changed.
 
 Usage: python3 -I tests/image_overlays.py IMAGE_ROOT
        python3 -I tests/image_overlays.py --paths
 """
 
 import hashlib
+import os
 import re
 import sys
 from pathlib import Path
@@ -72,6 +84,51 @@ OVERLAYS = (
     Overlay("config/novnc", "ui.js", "/opt/noVNC", "app/ui.js"),
     Overlay("config/firefox-services", "kill", "/etc/services.d/app", "kill"),
 )
+
+
+class Addition(NamedTuple):
+    """REPO_DIR/NAME (repo-relative), mounted at TARGET, a file the image does not have, in a
+    directory of the image that holds REQUIRED (both absolute paths in the image)."""
+
+    repo_dir: str
+    name: str
+    target: str
+    required: str
+
+    @property
+    def path(self) -> Path:
+        return REPO_ROOT / self.repo_dir / self.name
+
+
+ADDITIONS = (
+    Addition(
+        "config/firefox-services",
+        "xrdb-sync",
+        "/etc/services.d/xrdb/sync",
+        "/etc/services.d/xrdb/run",
+    ),
+)
+# Image directories copied out whole (each addition's target and required file is in one).
+COPIED_DIRS = ("/etc/services.d",)
+
+
+def in_dir(path: str, directory: str) -> bool:
+    """Whether the absolute image path PATH is inside DIRECTORY."""
+    return path.startswith(directory.rstrip("/") + "/")
+
+
+def image_paths() -> list[str]:
+    """The image paths to copy out (--paths): COPIED_DIRS, then each overlay's file outside them.
+
+    No path is inside another: `docker cp` of a directory onto one that a file copied before it
+    created would copy it inside that one.
+    """
+    outside = [
+        overlay.target
+        for overlay in OVERLAYS
+        if not any(in_dir(overlay.target, directory) for directory in COPIED_DIRS)
+    ]
+    return [*COPIED_DIRS, *outside]
 
 
 class Hunk(NamedTuple):
@@ -239,13 +296,36 @@ def check_image_file(overlay: Overlay, image_file: Path) -> list[str]:
     return []
 
 
+def check_addition(addition: Addition, image_root: Path) -> list[str]:
+    """What is wrong with the image's directory for ADDITION, under IMAGE_ROOT; [] if nothing."""
+    repo_file = addition.path.relative_to(REPO_ROOT)
+    directory = os.path.dirname(addition.target)
+    problems = []
+    # lexists: the image's xrdb/run is a symbolic link to /opt/base/bin/xrdb, which the copy
+    # does not hold.
+    if not os.path.lexists(image_root / addition.required.lstrip("/")):
+        problems.append(
+            f"the image has no {addition.required}, so its {directory} is not the service "
+            f"{repo_file} (mounted at {addition.target} in docker-compose.yml) was made for "
+            f"(with no {directory} at all, Docker creates one holding only that file); see "
+            f"{README}"
+        )
+    if os.path.lexists(image_root / addition.target.lstrip("/")):
+        problems.append(
+            f"the image has its own {addition.target}, which {repo_file} (mounted over it in "
+            f"docker-compose.yml) would hide: compare the two, then keep or remove the mount; "
+            f"see {README}"
+        )
+    return problems
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print(f"usage: {argv[0]} IMAGE_ROOT | --paths", file=sys.stderr)
         return 2
     if argv[1] == "--paths":
-        for overlay in OVERLAYS:
-            print(overlay.target)
+        for path in image_paths():
+            print(path)
         return 0
     image_root = Path(argv[1])
     failed = False
@@ -260,6 +340,17 @@ def main(argv: list[str]) -> int:
             f"ok    the image's {overlay.target} is the recorded one (sha256 "
             f"{recorded_sha256(overlay)}), and {overlay.path.relative_to(REPO_ROOT)} is it plus "
             f"{overlay.patch_file.relative_to(REPO_ROOT)}"
+        )
+    for addition in ADDITIONS:
+        problems = check_addition(addition, image_root)
+        for problem in problems:
+            print(f"FAIL  {problem}", file=sys.stderr)
+        if problems:
+            failed = True
+            continue
+        print(
+            f"ok    the image has {addition.required} and no {addition.target}, which "
+            f"{addition.path.relative_to(REPO_ROOT)} adds"
         )
     return 1 if failed else 0
 
