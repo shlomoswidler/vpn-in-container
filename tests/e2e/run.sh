@@ -359,6 +359,7 @@ start_firefox() {
         -e FF_PREF_NO_DATA_BAR=datareporting.policy.dataSubmissionPolicyBypassNotification=true \
         -v "$E2E_DIR/cursor-page.html:/e2e/cursor-page.html:ro" \
         "$IMAGE" >/dev/null
+    follow_start_log
     start_probe
 
     echo "waiting for Firefox to show the test page..."
@@ -369,12 +370,47 @@ start_firefox() {
         fi
         sleep "$START_POLL_S"
     done
-    WINDOW=$(in_x xdotool search --name 'native cursor e2e' | head -n 1) || {
-        echo "FAIL: Firefox never showed the test page" >&2
-        docker logs "$CONTAINER" 2>&1 | tail -30 >&2
-        exit 1
-    }
+    WINDOW=$(in_x xdotool search --name 'native cursor e2e' 2>/dev/null | head -n 1) ||
+        start_failed "the test page"
+    stop_following_start_log
     sleep 2 # let the page finish layout
+}
+
+# Follows the log of the test container just started into $WORK/start.log, so
+# that a start that fails still has its log to show: the containers run with
+# --rm, so one whose init stops it is gone, log and all, before the wait for
+# its window ends.
+follow_start_log() {
+    docker logs -f "$CONTAINER" >"$WORK/start.log" 2>&1 &
+    START_LOG_PID=$!
+}
+# Ends follow_start_log once the start has shown its window.
+stop_following_start_log() {
+    kill "$START_LOG_PID" 2>/dev/null || true
+    wait "$START_LOG_PID" 2>/dev/null || true
+}
+# start_failed WHAT: the start never showed WHAT. Fails as check firefox-start,
+# with the end of the container's log, and ends the run with its summary: every
+# check after the start needs it (and a run that exited without its summary
+# line would be reported as one that stopped, not as a failed check).
+start_failed() {
+    stop_following_start_log
+    checks=$((checks + 1))
+    failures=$((failures + 1))
+    printf 'FAIL  %-22s Firefox never showed %s within 90 s; the end of the container log:\n' \
+        firefox-start "$1"
+    tail -n 30 "$WORK/start.log" | sed 's/^/      /'
+    summary
+}
+# end_run LABEL MESSAGE: a step every later check of this run needs failed (a
+# helper server that did not start, a window that did not open, a container
+# that was not removed). Fails as check LABEL with MESSAGE and ends the run
+# with its summary, as start_failed does.
+end_run() {
+    checks=$((checks + 1))
+    failures=$((failures + 1))
+    printf 'FAIL  %-22s %s\n' "$1" "$2"
+    summary
 }
 
 # The image runs X and Firefox as USER_ID, which defaults to 1000.
@@ -420,8 +456,30 @@ FIREFOX_DEFAULT_PREFS="/usr/lib/firefox/defaults/pref /usr/lib/firefox/browser/d
 # v26.09.1: no private browsing indicator; scenario 10 checks the effect: a
 # cookie and history kept across a restart).
 BUILT_IN_DEFAULTS=" browser.privatebrowsing.autostart=false "
+# Prints the test container's /config/profile/prefs.js. Firefox saves its prefs
+# by writing a new file and renaming it over prefs.js, which it does in the
+# first seconds after its window shows. On a /config mounted from the host (as
+# scenarios 6 and 10 mount it), a read during that rename finds no file at all
+# on OrbStack (in 3000 renames, 2875 of 16818 reads; gaps of 3.8 ms at most,
+# and no read of part of a file, measured), so a read that finds none is tried
+# again, up to 20 times 0.1 s apart.
+read_prefs() {
+    local tries=0
+    until docker exec "$CONTAINER" cat /config/profile/prefs.js 2>/dev/null; do
+        tries=$((tries + 1))
+        ((tries < 20)) || return 1
+        sleep 0.1
+    done
+}
 check_prefs() {
-    local i env name value pref_value line default
+    local i env name value pref_value line default prefs
+    # One read for all the entries (read_prefs), each checked in it.
+    if ! prefs=$(read_prefs); then
+        checks=$((checks + 1))
+        echo "FAIL  prefs.js: the container's /config/profile/prefs.js could not be read"
+        failures=$((failures + 1))
+        return 0
+    fi
     # From the second argument: each entry is the value of the "-e" before it
     # (an index of -1 is an error in bash 3.2, and the last argument in bash 4.3+).
     for ((i = 1; i < ${#FIREFOX_ARGS[@]}; i++)); do
@@ -438,12 +496,12 @@ check_prefs() {
         pref_value=${value#*=}
         line="user_pref(\"${value%%=*}\", $pref_value);"
         default="pref(\"${value%%=*}\", $pref_value);"
-        if docker exec "$CONTAINER" grep -qxF "$line" /config/profile/prefs.js; then
+        if grep -qxF "$line" <<<"$prefs"; then
             echo "ok    $name -> $line"
         elif docker exec "$CONTAINER" sh -c "grep -qxF -r -e '$default' $FIREFOX_DEFAULT_PREFS"; then
             echo "ok    $name -> the default is the same: $default"
         elif [[ "$BUILT_IN_DEFAULTS" == *" $value "* ]] &&
-            ! docker exec "$CONTAINER" grep -qF "user_pref(\"${value%%=*}\"," /config/profile/prefs.js; then
+            ! grep -qF "user_pref(\"${value%%=*}\"," <<<"$prefs"; then
             echo "ok    $name -> no line, Firefox's built-in default is the same: $value"
         else
             echo "FAIL  $name: prefs.js has no line $line"
@@ -524,6 +582,7 @@ start_firefox_windowed() {
         -e FF_PREF_NO_URLBAR_AUTOFILL=browser.urlbar.autoFill=false \
         -v "$E2E_DIR:/e2e:ro" \
         "$IMAGE" >/dev/null
+    follow_start_log
     start_probe
     echo "waiting for Firefox to show $page..."
     WINDOW=""
@@ -532,13 +591,12 @@ start_firefox_windowed() {
         WINDOW=$(in_x xdotool search --classname Navigator 2>/dev/null | head -n 1) || true
         if [[ -n "$WINDOW" ]] &&
             [[ "$(in_x xdotool getwindowname "$WINDOW" 2>/dev/null)" == *"$title"* ]]; then
+            stop_following_start_log
             return 0
         fi
         sleep "$START_POLL_S"
     done
-    echo "FAIL: Firefox never showed $page" >&2
-    docker logs "$CONTAINER" 2>&1 | tail -30 >&2
-    exit 1
+    start_failed "$page"
 }
 
 # Presses BUTTON (with MODIFIER, or "none") at (X,Y), drags to (X2,Y2), reads
@@ -625,8 +683,7 @@ scenario_4() {
         sleep 0.5
     done
     if [[ -z "$LIBRARY" ]]; then
-        echo "FAIL: the Library window did not open" >&2
-        exit 1
+        end_run library-window "the Library window did not open (Ctrl+Shift+O)"
     fi
     sleep 2
     # Client area position and size; Openbox's frame surrounds it.
@@ -1524,9 +1581,8 @@ start_web_server() {
         python -I /e2e/torrent_server.py "$WEB_PORT" /srv >/dev/null
     until docker exec "$CONTAINER" wget -q -O /dev/null "http://127.0.0.1:$WEB_PORT/" 2>/dev/null; do
         if ((SECONDS >= deadline)); then
-            echo "FAIL: torrent_server.py did not start" >&2
-            docker logs "$CONTAINER-web" >&2
-            exit 1
+            docker logs "$CONTAINER-web" 2>&1 | sed 's/^/      /'
+            end_run web-server-start "torrent_server.py did not answer within 30 s (its log above)"
         fi
         sleep 0.5
     done
@@ -1542,8 +1598,7 @@ stop_firefox() {
     docker stop "$CONTAINER" >/dev/null
     while docker inspect "$CONTAINER" >/dev/null 2>&1; do
         if ((SECONDS >= deadline)); then
-            echo "FAIL: $CONTAINER was not removed after it stopped" >&2
-            exit 1
+            end_run container-removed "$CONTAINER was not removed within 60 s after it stopped"
         fi
         sleep 0.5
     done
@@ -1556,11 +1611,11 @@ stop_firefox() {
 # (KEEP_APP_RUNNING=1 restarts it only while the container runs).
 check_clean_stop() {
     local log=$WORK/stop.log follower result
-    checks=$((checks + 1))
     docker logs -f -t "$CONTAINER" >"$log" 2>&1 &
     follower=$!
     stop_firefox
     wait "$follower" || true
+    checks=$((checks + 1))
     result=$(python3 -I -c '
 import re, sys
 from datetime import datetime
@@ -1900,7 +1955,6 @@ scenario_8() {
     STUN_MAPPED=203.0.113.7 # a documentation address (RFC 5737), on no interface
     OTHER_ADDRESS=10.99.0.2 # webrtc-page.html asks for the STUN server here
     DEFAULT_ADDRESS=10.98.0.2
-    checks=$((checks + 1))
     start_firefox_windowed webrtc-page.html "e2e webrtc page" \
         -e FF_PREF_E2E_GUM_NO_PROMPT=media.navigator.permission.disabled=true \
         -e FF_PREF_E2E_GUM_FAKE=media.navigator.streams.fake=true \
@@ -1917,9 +1971,8 @@ scenario_8() {
     deadline=$((SECONDS + 30))
     until docker exec "$CONTAINER" grep -q ':0D96 ' /proc/net/udp; do
         if ((SECONDS >= deadline)); then
-            echo "FAIL: stun_server.py did not start" >&2
-            docker logs "$CONTAINER-stun" >&2
-            exit 1
+            docker logs "$CONTAINER-stun" 2>&1 | sed 's/^/      /'
+            end_run stun-server-start "stun_server.py did not listen within 30 s (its log above)"
         fi
         sleep 0.5
     done
@@ -1931,6 +1984,7 @@ scenario_8() {
         [[ "$result" == webrtc-result* || "$result" == webrtc-error* ]] && break
         sleep 0.5
     done
+    checks=$((checks + 1))
     # "webrtc-result host=<addresses> srflx=<addresses> raddr=<addresses>": no host
     # candidate, the reflexive address, and no local address anywhere (not even as
     # a reflexive candidate's related address).
