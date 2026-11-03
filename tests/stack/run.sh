@@ -47,7 +47,10 @@
 # its restart of a container that takes the whole stop timeout, qSticky's next
 # check of the listening port, and qBittorrent's scan of the watch folder.
 # Each is set going right after the health checks and checked at the end, so
-# its wait overlaps the other checks instead of adding to them.
+# its wait overlaps the other checks instead of adding to them. Each passes
+# only when its event happened by its deadline, by the event's own time
+# (a StartedAt, a log line's Docker timestamp, a torrent's added_on), however
+# long after that the check looks.
 #
 # It changes nothing permanently: the listening port is restored by qSticky
 # (or by this script), and the test torrent and test containers are removed,
@@ -75,6 +78,11 @@ IP_SERVICES="https://ipinfo.io/ip https://api.ipify.org"
 QBT_URL=http://localhost:9080
 FIREFOX_URL=http://localhost:5800
 HEALTH_TIMEOUT=360
+# How long past its deadline a deferred check keeps looking for its event:
+# the event's own time decides, and seeing it takes up to the longest poll
+# interval (3 s), plus the call that looks, plus up to 1 s from SECONDS
+# counting whole seconds on this computer's clock.
+OBSERVE_GRACE=5
 WORK=$(mktemp -d)
 TEST_ID="stack-test-$$"
 
@@ -145,14 +153,75 @@ elif key.startswith("config-target:"):
 EOF
 }
 
-# Prints the JSON value at a dotted path from stdin: json_get PATH
+# Prints the JSON value at a dotted path from stdin (a number indexes a list):
+# json_get PATH
 json_get() {
     python3 -I -c '
 import json, sys
 value = json.load(sys.stdin)
 for part in sys.argv[1].split("."):
-    value = value[part]
+    value = value[int(part)] if isinstance(value, list) else value[part]
 print(json.dumps(value) if isinstance(value, (dict, list)) else value)' "$1"
+}
+
+# The deferred checks compare when an event happened with its deadline on one
+# clock: the Docker daemon's. Its containers share it (one Linux kernel), so
+# StartedAt, the timestamps of docker logs and qBittorrent's added_on are all
+# read on it; this computer's clock may differ from it.
+# Prints the daemon's time now (RFC 3339, to the nanosecond).
+daemon_time() { docker info -f '{{.SystemTime}}'; }
+# Python for times: ns_of(TIME) is nanoseconds since the epoch, from RFC 3339
+# as Docker prints it (to the nanosecond, Z or an offset) or from whole Unix
+# seconds; utc(NS) shows it in UTC to the millisecond.
+CLOCK_PY='
+import calendar, re, sys, time
+def ns_of(text):
+    if text.isdigit():
+        return int(text) * 10**9
+    m = re.fullmatch(r"(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)(?:\.(\d{1,9}))?(Z|[+-]\d\d:\d\d)", text)
+    if not m:
+        sys.exit(f"not an RFC 3339 time: {text!r}")
+    seconds = calendar.timegm(tuple(int(part) for part in m.groups()[:6]))
+    if m[8] != "Z":
+        seconds -= int(m[8][0] + "1") * (int(m[8][1:3]) * 3600 + int(m[8][4:6]) * 60)
+    return seconds * 10**9 + int((m[7] or "").ljust(9, "0"))
+def utc(ns):
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ns // 10**9)) + f".{ns % 10**9 // 10**6:03d}Z"
+'
+# Prints a deadline SECONDS after TIME, in nanoseconds since the epoch:
+# deadline_ns TIME SECONDS
+deadline_ns() {
+    python3 -I -c "$CLOCK_PY"'
+print(ns_of(sys.argv[1]) + int(sys.argv[2]) * 10**9)' "$1" "$2"
+}
+# Prints "on time" when EVENT (a time as ns_of takes it) is by DEADLINE
+# (nanoseconds), else "late <event> <deadline>" in UTC: event_timing EVENT
+# DEADLINE. Whole seconds (qBittorrent's added_on, truncated) are late only in
+# a second after the deadline's: an event less than 1 s late can pass, and
+# none on time fails.
+event_timing() {
+    python3 -I -c "$CLOCK_PY"'
+event, deadline = sys.argv[1], int(sys.argv[2])
+event_ns = ns_of(event)
+late = event_ns // 10**9 > deadline // 10**9 if event.isdigit() else event_ns > deadline
+shown = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(event_ns // 10**9)) if event.isdigit() else utc(event_ns)
+print(f"late {shown} {utc(deadline)}" if late else "on time")' "$1" "$2"
+}
+# Passes MESSAGE when its event happened by its deadline, else fails it with
+# both times: timed_check MESSAGE EVENT DEADLINE SOURCE START, where EVENT is
+# the event's own time (see event_timing), SOURCE says where that time comes
+# from and START what the deadline is counted from.
+timed_check() {
+    local timing event_at deadline_at
+    timing=$(event_timing "$2" "$3" 2>&1) || true
+    if [[ "$timing" == "on time" ]]; then
+        pass "$1"
+    elif [[ "$timing" == "late "* ]]; then
+        read -r _ event_at deadline_at <<<"$timing"
+        fail "$1 too late: at $event_at ($4), after its deadline $deadline_at ($5)"
+    else
+        fail "$1, but when is unknown ($4 '$2'): $timing"
+    fi
 }
 
 # Runs a command until it prints an IP address (3 tries); prints the address.
@@ -332,23 +401,31 @@ fi
 # Both fail their health check at once. Autoheal's next pass restarts the
 # labeled one, and that restart takes the whole stop timeout
 # (AUTOHEAL_DEFAULT_STOP_TIMEOUT, 30 s), so it runs while the checks below do;
-# the unlabeled one stays unhealthy all that time.
+# the unlabeled one stays unhealthy all that time. Once restarted, a container
+# passes its health check (its second start creates /restarted, which the
+# check looks for), so Autoheal restarts it once only: its StartedAt stays
+# that restart's time. The deadline counts from just before they start.
+restart_limit=$((${interval:-5} * 3 + 30))
+restart_deadline=$(deadline_ns "$(daemon_time)" "$restart_limit")
 for kind in labeled unlabeled; do
     labels=()
     [[ "$kind" == labeled ]] && labels=(--label autoheal=true)
     docker run -d --name "$TEST_ID-$kind" --network none ${labels[@]+"${labels[@]}"} \
-        --health-cmd false --health-interval 2s --health-retries 1 --health-start-period 0s \
-        "$PLAIN_IMAGE" sleep 600 >/dev/null
+        --health-cmd 'test -e /restarted' --health-interval 2s --health-retries 1 \
+        --health-start-period 0s "$PLAIN_IMAGE" \
+        sh -c '[ ! -e /started ] || touch /restarted; touch /started; exec sleep 600' >/dev/null
 done
 labeled_start=$(docker inspect -f '{{.State.StartedAt}}' "$TEST_ID-labeled")
 unlabeled_start=$(docker inspect -f '{{.State.StartedAt}}' "$TEST_ID-unlabeled")
-restart_until=$((SECONDS + ${interval:-5} * 3 + 30))
+restart_until=$((SECONDS + restart_limit))
 echo "      started $TEST_ID-labeled (label autoheal=true) and $TEST_ID-unlabeled, both failing their health check"
 
 echo "== qBittorrent: watch folder (checked at the end)"
 watch_dir=$(compose_value qbittorrent mount:/watch)
 test_hash=$(python3 -I "$STACK_DIR/torrent_file.py" "$WORK/test.torrent" "$TEST_ID")
 watch_file="$watch_dir/$TEST_ID.torrent"
+# The deadline counts from just before the drop.
+added_deadline=$(deadline_ns "$(daemon_time)" 60)
 cp "$WORK/test.torrent" "$watch_file"
 added_until=$((SECONDS + 60))
 echo "      dropped $TEST_ID.torrent in the watch folder"
@@ -501,11 +578,14 @@ if [[ "$forwarded" =~ ^[0-9]+$ ]] && ((forwarded > 0)); then
     wrong_port=$((forwarded < 65535 ? forwarded + 1 : forwarded - 1))
     # Until qSticky is seen to restore it, the cleanup puts the port back.
     restore_port=$forwarded
-    port_change_since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    # On the daemon's clock, for docker logs --since as for the deadline.
+    port_change_since=$(daemon_time)
     if set_listen_port "$wrong_port"; then
         # qSticky checks every CHECK_INTERVAL seconds, so its restore can take
         # that long: it is checked at the end, by the same deadline from now.
-        port_restore_until=$((SECONDS + ${check_interval:-30} * 2 + 30))
+        port_restore_limit=$((${check_interval:-30} * 2 + 30))
+        port_restore_deadline=$(deadline_ns "$port_change_since" "$port_restore_limit")
+        port_restore_until=$((SECONDS + port_restore_limit))
         port_restore=pending
         echo "      set qBittorrent's listening port to $wrong_port; qSticky's restore is checked at the end"
     else
@@ -1167,23 +1247,28 @@ else
 fi
 docker rm -f -v "$TEST_ID-proxy-target" >/dev/null 2>&1 || true
 
-# The checks set going after the health checks. Each waits until its deadline,
-# counted from when it was set going (as when it waited right away), and looks
-# at least once, however long the checks in between took.
+# The checks set going after the health checks. Each has a deadline counted
+# from when it was set going (as when it waited right away), on the daemon's
+# clock. It looks for its event at least once, and until OBSERVE_GRACE past
+# the deadline, and passes only when the event's own time is by the deadline:
+# an event after it fails, however long the checks in between took.
 
 echo "== qBittorrent: watch folder"
-added=""
+added_on=""
 while :; do
     torrents=$(curl -s --max-time 10 "$QBT_URL/api/v2/torrents/info?hashes=$test_hash" || true)
     if [[ "$torrents" == *"$test_hash"* ]]; then
-        added=yes
-        break
+        # When qBittorrent added it, in whole seconds (truncated).
+        added_on=$(json_get 0.added_on <<<"$torrents" 2>/dev/null) || added_on=""
+        [[ "$added_on" =~ ^[0-9]+$ ]] && break
+        added_on=""
     fi
-    ((SECONDS < added_until)) || break
+    ((SECONDS < added_until + OBSERVE_GRACE)) || break
     sleep 2
 done
-if [[ "$added" == yes ]]; then
-    pass "a .torrent dropped in the watch folder was added"
+if [[ -n "$added_on" ]]; then
+    timed_check "a .torrent dropped in the watch folder was added" "$added_on" "$added_deadline" \
+        "qBittorrent's added_on, whole seconds" "60s after the drop"
 else
     fail "a .torrent dropped in the watch folder was not added within 60s"
 fi
@@ -1191,43 +1276,55 @@ fi
 if [[ "$port_restore" == pending ]]; then
     echo "== port forwarding and qSticky: the port restore"
     # qSticky may correct the port within moments of the change, so its own log
-    # line is the evidence, together with the port being back afterward.
-    restored=""
+    # lines are the evidence, together with the port being back afterward:
+    # "Port change needed", then "Successfully updated port" (logged once it
+    # has set the port and read it back). Docker's timestamp of the second is
+    # when it restored the port.
+    restored_at=""
     while :; do
         listen=$(qbt_preferences | json_get listen_port 2>/dev/null || echo "")
-        qsticky_log=$(docker logs --since "$port_change_since" "$QSTICKY" 2>&1 || true)
-        if [[ "$listen" == "$forwarded" &&
-            "$qsticky_log" == *"Port change needed: $wrong_port -> $forwarded"* ]]; then
-            restored=yes
-            break
-        fi
-        ((SECONDS < port_restore_until)) || break
+        qsticky_log=$(docker logs --timestamps --since "$port_change_since" "$QSTICKY" 2>&1 || true)
+        restored_at=$(awk -v needed="Port change needed: $wrong_port -> $forwarded" \
+            -v updated="Successfully updated port to $forwarded" '
+            function ends_with(text) { return substr($0, length($0) - length(text) + 1) == text }
+            ends_with(needed) { seen = 1 }
+            seen && ends_with(updated) { print $1; exit }' <<<"$qsticky_log")
+        [[ "$listen" == "$forwarded" && -n "$restored_at" ]] && break
+        restored_at=""
+        ((SECONDS < port_restore_until + OBSERVE_GRACE)) || break
         sleep 3
     done
-    if [[ "$restored" == yes ]]; then
-        pass "qSticky restored the listening port ($wrong_port -> $forwarded)"
+    if [[ -n "$restored_at" ]]; then
         restore_port=""
+        timed_check "qSticky restored the listening port ($wrong_port -> $forwarded)" "$restored_at" \
+            "$port_restore_deadline" "Docker's timestamp of qSticky's log line" \
+            "${port_restore_limit}s after the change"
     else
         fail "qSticky did not restore the port (set $wrong_port; now '$listen')"
     fi
 fi
 
 echo "== Autoheal"
-restarted=""
+# Its StartedAt, once it differs from the first start's, is when the restart
+# started it again (RestartCount counts only restarts by a restart policy).
+restarted_at=""
 while :; do
-    if [[ "$(docker inspect -f '{{.State.StartedAt}}' "$TEST_ID-labeled")" != "$labeled_start" ]]; then
-        restarted=yes
+    labeled_now=$(docker inspect -f '{{.State.StartedAt}}' "$TEST_ID-labeled" 2>/dev/null) ||
+        labeled_now=""
+    if [[ -n "$labeled_now" && "$labeled_now" != "$labeled_start" ]]; then
+        restarted_at=$labeled_now
         break
     fi
-    ((SECONDS < restart_until)) || break
+    ((SECONDS < restart_until + OBSERVE_GRACE)) || break
     sleep 0.5
 done
 # The unlabeled one has been unhealthy since it was started, through several
 # of Autoheal's passes and the whole labeled restart.
 unlabeled_health=$(docker inspect -f '{{.State.Health.Status}}' "$TEST_ID-unlabeled")
 unlabeled_now=$(docker inspect -f '{{.State.StartedAt}}' "$TEST_ID-unlabeled")
-if [[ "$restarted" == yes ]]; then
-    pass "restarted an unhealthy container labeled autoheal=true"
+if [[ -n "$restarted_at" ]]; then
+    timed_check "restarted an unhealthy container labeled autoheal=true" "$restarted_at" \
+        "$restart_deadline" "its StartedAt" "${restart_limit}s after starting the test containers"
 else
     fail "did not restart an unhealthy container labeled autoheal=true"
 fi
