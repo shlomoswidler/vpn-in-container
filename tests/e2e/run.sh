@@ -36,16 +36,17 @@
 # uniquely). Then Quit & Restart: Ctrl+Q asks (Escape cancels), and Ctrl+Q, the
 # File menu and the main menu restart Firefox in the same container
 # (KEEP_APP_RUNNING=1), still private; so does the container's shutdown key,
-# Ctrl+Alt+Shift+Q, without asking. It runs as four shards, each in a fresh
+# Ctrl+Alt+Shift+Q, without asking. It runs as five shards, each in a fresh
 # container: 5a the only tab's drags, Ctrl+N, Ctrl+Shift+P, Ctrl+T and Ctrl+W;
-# 5b the Shift+clicked link, the tab drags, the pop-ups, another private window,
-# no Window menu, Ctrl+` and no Close Window, and closing every tab; 5c Ctrl+Q
-# (cancel, then restart) and the File menu's Quit & Restart; 5d the main
-# menu's Quit & Restart and the shutdown key.
+# 5b the Shift+clicked link, the tab drags, the pop-ups and another private
+# window; 5e, on the tabs 5b's checks leave, no Window menu, Ctrl+` and no
+# Close Window, and closing every tab; 5c Ctrl+Q (cancel, then restart) and the
+# File menu's Quit & Restart; 5d the main menu's Quit & Restart and the
+# shutdown key.
 #
 # Scenarios 1-9 run with permanent private browsing on (FIREFOX_PRIVATE_BROWSING=true,
-# whatever .env sets), scenario 10 (but the end of 10a) and the end of scenario
-# 6 (6s) with it off (false, the default).
+# whatever .env sets), scenario 10 (but the second start of 10g) and the end of
+# scenario 6 (6s) with it off (false, the default).
 #
 # Scenario 6 checks that Firefox's "Private browsing" indicator shows in the tab
 # strip (userChrome.css shows it when permanent private browsing is on), and
@@ -89,15 +90,16 @@
 # the cookie, closing the last window (normal, or private after the normal one
 # closed) restarts Firefox with a fresh normal window, a .torrent link still
 # downloads into /config/downloads, and `docker stop` quits Firefox cleanly.
-# Then the switch from off to on: on that /config, with private browsing on, the
-# indicator is shown and the kept cookie is not. It runs as six shards, each in
-# a fresh container: 10a the kept profile and the switch to on; 10b the first
-# private windows and their cookies; 10c pop-ups and new windows from both
-# windows; 10d switching between the windows and closing the private one; 10e
-# no indicator, and Quit & Restart; 10f closing the last window, the download
-# and the clean stop. Each shard first makes the tabs, windows and cookies its
-# checks start from, with the same actions the scenario used before them, and
-# stops with a FAIL if one of those steps does not show its result.
+# Then the switch from off to on: on a /config that had private browsing off,
+# with private browsing on, the indicator is shown and the kept cookie is not. It runs as eight shards, each
+# in a fresh container: 10a the kept profile; 10b the first private windows and
+# their cookies; 10c pop-ups and new windows from both windows; 10d switching
+# between the windows and closing the private one; 10e Quit & Restart; 10f
+# closing the last window, the download and the clean stop; 10g the switch to
+# on, on a /config of its own; 10h no indicator. Each shard first makes the
+# tabs, windows and cookies its checks start from, with the same actions the
+# scenario used before them, and stops with a FAIL if one of those steps does
+# not show its result.
 #
 # Scenario 11 checks that a FIREFOX_PRIVATE_BROWSING other than true or false
 # stops the container at start, with the reason in its log, before the image
@@ -119,7 +121,7 @@
 # ids, only those scenarios run, in order, in this process, e.g.
 # `tests/e2e/run.sh 7 8` or `tests/e2e/run.sh 10c`; the number of a scenario
 # that runs as shards selects all of them (`tests/e2e/run.sh 5` is 5a 5b 5c
-# 5d). Scenario 4 continues in scenario 3's container, so it needs 3 too.
+# 5d 5e). Scenario 4 continues in scenario 3's container, so it needs 3 too.
 
 set -euo pipefail
 
@@ -127,20 +129,22 @@ E2E_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$E2E_DIR/../.." && pwd)
 SELF="$E2E_DIR/$(basename "$0")"
 # The scenario ids: a shard of a scenario is its number and a letter.
-ALL_SCENARIOS="1a 1b 1c 2 3 4 5a 5b 5c 5d 6m 6s 7 8 9 10a 10b 10c 10d 10e 10f 11 12"
+ALL_SCENARIOS="1a 1b 1c 2 3 4 5a 5b 5c 5d 5e 6m 6s 7 8 9 10a 10b 10c 10d 10e 10f 10g 10h 11 12"
 # The groups a run without arguments starts, one process each, all at the same
 # time, so the run takes as long as its longest group: each group of more than
 # one scenario holds short ones that run one after another. Each group must
 # hold every scenario another of its scenarios continues from (4 needs 3); no
 # shard continues from another. Measured on a Mac with 16 CPUs (OrbStack: 16
-# CPUs, 31 GB), in seconds, each group alone, then the range in three runs of
-# all of them at once (48-50 s for the whole run): 1a 34, 35-37; 1b 33, 35-37;
-# 1c 31, 32-34; 2 7 8 35, 39-41; 3 4 35, 35-37; 5a 31, 34-35; 5b 43, 48-50; 5c
-# 28, 31-33; 5d 25, 29-31; 6m 40, 39-41; 6s 25, 25-28; 9 11 12 37, 39-42; 10a
-# 40, 40-42; 10b 38, 37-38; 10c 39, 43; 10d 33, 36-38; 10e 40, 42-44; 10f 44,
-# 44-46.
-SCENARIO_GROUPS=("1a" "1b" "1c" "2 7 8" "3 4" "5a" "5b" "5c" "5d" "6m" "6s" "9 11 12"
-    "10a" "10b" "10c" "10d" "10e" "10f")
+# CPUs, 31 GB), in seconds, the range in three runs of all the groups at once
+# (45-46 s for the whole run), then in two runs of tests/run-all.sh, which
+# runs every suite at once (58 s for it, e2e's groups 56 s): 1a 37-39, 44-47;
+# 1b 38-39, 43-45; 1c 33-35, 43-44; 2 7 8 42, 52; 3 4 37-40, 44-48; 5a 33-37,
+# 45; 5b 33-36, 45-47; 5c 35-36, 42-43; 5d 30-33, 39-43; 5e 38, 45-47; 6m
+# 43-44, 53-55; 6s 29, 37-38; 9 11 12 43-45, 51-54; 10a 29-30, 40-41; 10b
+# 41-42, 52-53; 10c 43-45, 55-56; 10d 39-41, 48-50; 10e 32-33, 42-44; 10f
+# 45-46, 55-56; 10g 28-29, 39-40; 10h 29-31, 31.
+SCENARIO_GROUPS=("1a" "1b" "1c" "2 7 8" "3 4" "5a" "5b" "5c" "5d" "5e" "6m" "6s" "9 11 12"
+    "10a" "10b" "10c" "10d" "10e" "10f" "10g" "10h")
 # The scenarios this run runs, as " N N ... ", in ALL_SCENARIOS order; empty
 # for a run of all the groups. An argument is a scenario id, or the number of a
 # scenario that runs as shards, which selects every shard of it.
@@ -716,27 +720,47 @@ longest_latency() {
         echo 0
     fi
 }
-# Prints how long, in seconds, an absence check of KIND waits: twice the
+# Prints how long, in milliseconds, an absence check of KIND waits: twice the
 # longest latency of that kind measured so far in this run, at least
-# ABSENCE_MIN_MS. Measured on this suite: a tab shows at the first read (under
-# 0.1 s) at light load, within 0.3 s with 16 Firefox containers at once, and a
-# new window is listed within 0.15 s and 0.45 s
-# (docs/agents_output/analysis/test-speed-60s-e2e-sc5-sc10.md): the floor alone
-# is more than twice the longest of either, even before this run has measured
-# one.
+# ABSENCE_MIN_MS and at most ABSENCE_MAX_MS. Measured on this suite: a tab
+# shows at the first read (under 0.1 s) at light load, within 0.3 s with 16
+# Firefox containers at once, and a new window is listed within 0.15 s and
+# 0.45 s (docs/agents_output/analysis/test-speed-60s-e2e-sc5-sc10.md): the
+# floor alone is more than twice the longest of either, even before this run
+# has measured one. The ceiling is the fixed wait these checks had before they
+# were sized: once, with every suite running at once, one action took 1695 ms
+# to show its change, which made each later window absence wait 3.39 s
+# (docs/agents_output/fixes/e2e-shards-60s.md). A change that comes later than
+# the wait passes that check, but the next check that reads the windows or
+# tabs compares all of them and fails.
 ABSENCE_MIN_MS=1000
-absence_wait() {
+ABSENCE_MAX_MS=2000
+absence_ms() {
     local ms
     ms=$((2 * $(longest_latency "$1")))
     ((ms >= ABSENCE_MIN_MS)) || ms=$ABSENCE_MIN_MS
+    ((ms <= ABSENCE_MAX_MS)) || ms=$ABSENCE_MAX_MS
+    echo "$ms"
+}
+# Prints absence_ms in seconds, for sleep: absence_wait KIND.
+absence_wait() {
+    local ms
+    ms=$(absence_ms "$1")
     printf '%d.%03d\n' $((ms / 1000)) $((ms % 1000))
 }
 
-# Prints the longest latency of KIND for summary: "longest N ms", or "none
+# Prints the longest latency of KIND for summary: "longest N ms", with what
+# the ceiling cut if twice that is more than ABSENCE_MAX_MS, or "none
 # measured" (the wait is then ABSENCE_MIN_MS).
 latency_note() {
+    local longest
     if [[ -f "$WORK/latency-$1" ]]; then
-        echo "longest $(longest_latency "$1") ms"
+        longest=$(longest_latency "$1")
+        if ((2 * longest > ABSENCE_MAX_MS)); then
+            echo "longest $longest ms; twice that, $((2 * longest)) ms, capped at $ABSENCE_MAX_MS ms"
+        else
+            echo "longest $longest ms"
+        fi
     else
         echo "none measured"
     fi
@@ -1365,7 +1389,7 @@ context_link_y=$((DISPLAY_H * 9 / 10))
 # change the tabs, which shows the keys and drags reach Firefox.
 # Each shard starts a fresh container on single-window-page.html, so it has
 # one tab, main: what the checks before 5b and 5d also leave (5c makes the new
-# tab its checks start from).
+# tab its checks start from, 5e the tabs 5b's checks leave).
 start_single_window() {
     start_firefox_windowed single-window-page.html "sw:main "
     in_x xdotool windowactivate --sync "$WINDOW"
@@ -1383,13 +1407,50 @@ scenario_5a() {
     check_single_window ctrl-t "main untitled" untitled in_x xdotool key ctrl+t
     check_single_window ctrl-w main main in_x xdotool key ctrl+w
 }
+# The tabs scenario 5b's checks leave, in order, the last one shown.
+SC5_TABS="shift-click main popup popup-plain blank private"
+# A tab dragged along the strip takes its new place after the drop, not at
+# it: measured, 0.44-0.59 s after the drag ended; a walk of the tabs before
+# then finds the old order. wait_last_tab NAME waits up to 15 s until WINDOW's
+# last tab (Alt+9, which leaves it shown) is page NAME (see tab_prefix), and
+# fails if it is not by then.
+wait_last_tab() {
+    local prefix title deadline=$((SECONDS + 15))
+    prefix=$(tab_prefix "$1")
+    until in_x xdotool key alt+9 sleep 0.2 && title=$(shown_title) &&
+        { [[ -z "$prefix" && -z "$title" ]] || [[ -n "$prefix" && "$title" == "$prefix"* ]]; }; do
+        ((SECONDS < deadline)) || return 1
+    done
+}
+# drag_to_last NAME X Y X2 Y2: drags a tab along the strip (drag) to the end,
+# where it is page NAME, and gives it up to 15 s to take its place there
+# (wait_last_tab), for a check: if it does not, the check's own reads of the
+# tab shown and of every tab find the order it has.
+drag_to_last() {
+    local name=$1
+    shift
+    drag "$@" || return 1
+    wait_last_tab "$name" || true
+}
+# tabs_become TABS COMMAND...: runs COMMAND, which reorders WINDOW's tabs,
+# waits until its last tab is the last of TABS (wait_last_tab), then checks
+# that it has exactly the tabs TABS (check_tabs), for a setup step.
+tabs_become() {
+    local tabs=$1 names=()
+    shift
+    read -r -a names <<<"$tabs"
+    "$@" || return 1
+    wait_last_tab "${names[${#names[@]} - 1]}" || return 1
+    check_tabs "$tabs"
+}
 scenario_5b() {
-    echo "== scenario 5b: Firefox stays one maximized window (links, tab drags, pop-ups, no Close Window)"
+    echo "== scenario 5b: Firefox stays one maximized window (links, tab drags, pop-ups, another private window)"
     start_single_window
     # Opens a new window; single-window.cfg moves its tab into the first window.
     check_single_window shift-click "main shift-click" shift-click \
         in_x xdotool mousemove "$((DISPLAY_W / 2))" "$link_y" keydown shift click 1 keyup shift
-    check_single_window tab-moved-along-strip "shift-click main" main drag 100 20 420 20
+    check_single_window tab-moved-along-strip "shift-click main" main \
+        drag_to_last main 100 20 420 20
     check_single_window second-tab-torn-off "shift-click main" - \
         drag 100 20 "$drop_right_x" "$drop_right_y"
     # Pop-ups: window.open() with a size asks for a 400x300 pop-up window, one
@@ -1401,9 +1462,21 @@ scenario_5b() {
     check_single_window target-blank "shift-click main popup popup-plain blank" blank \
         in_x xdotool mousemove "$((DISPLAY_W / 2))" "$blank_y" click 1
     # Another private window (here every window is private): its tab moves in too.
-    check_single_window private-window "shift-click main popup popup-plain blank private" private \
-        open_private_window private
-    sw_tabs="shift-click main popup popup-plain blank private"
+    check_single_window private-window "$SC5_TABS" private open_private_window private
+}
+scenario_5e() {
+    echo "== scenario 5e: Firefox stays one maximized window (no Window menu, no Close Window, closing every tab)"
+    start_single_window
+    # The tabs 5b's checks leave, made with the same actions: the Shift+clicked
+    # link, the first tab dragged after it, the three pop-ups (each clicked on
+    # the page shown, the tab before it), another private window.
+    setup_bands sw-band shift-click || return 0
+    setup_step sw-tab-moved "the first tab dragged after the second (tabs shift-click main)" \
+        tabs_become "shift-click main" drag 100 20 420 20 || return 0
+    setup_bands sw-band popup popup-plain blank || return 0
+    setup_step sw-private-window "another private window's tab" \
+        tab_shows "$WINDOW" private open_private_window private || return 0
+    sw_tabs=$SC5_TABS
     # No Window menu, and Ctrl+` does nothing.
     check_no_window_menu no-window-menu
     check_single_window ctrl-grave "$sw_tabs" - in_x xdotool key ctrl+grave
@@ -1582,9 +1655,9 @@ new_private_window() {
 }
 
 # click_band NAME: in window WINDOW, shown first, clicks the band of
-# single-window-page.html that opens page NAME as checks in scenario 10 do (a
-# Shift+click for shift-click), so a shard can make the tabs earlier checks
-# made.
+# single-window-page.html that opens page NAME as checks in scenarios 5 and 10
+# do (a Shift+click for shift-click), so a shard can make the tabs earlier
+# checks made.
 click_band() {
     local y
     case $1 in
@@ -1633,6 +1706,24 @@ print(con.execute(
     ("%/cookie-page.html",),
 ).fetchone()[0])
 ' "$copy/places.sqlite"
+}
+
+# Succeeds if the cookies of the profile in DIR (a host directory mounted at
+# /config) hold a cookie NAME, read from a copy of cookies.sqlite after the
+# container stopped: profile_has_cookie DIR NAME.
+profile_has_cookie() {
+    local cookies=$1/profile/cookies.sqlite copy=$WORK/cookies-copy
+    rm -rf "$copy"
+    mkdir "$copy"
+    [[ -f "$cookies" ]] || return 1
+    cp "$cookies" "$copy/"
+    [[ ! -f "$cookies-wal" ]] || cp "$cookies-wal" "$copy/"
+    python3 -I -c '
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+count = con.execute("SELECT COUNT(*) FROM moz_cookies WHERE name = ?", (sys.argv[2],)).fetchone()[0]
+sys.exit(0 if count else 1)
+' "$copy/cookies.sqlite" "$2"
 }
 
 # check_kept LABEL EXPECTED ACTUAL: ok if ACTUAL is EXPECTED.
@@ -2020,9 +2111,10 @@ check_indicator() {
 # opens private windows on request, as Firefox itself does. Firefox moves no
 # tab between a private and a normal window, so there can be one of each:
 # every new window's tabs, and every pop-up, must land in the window of their
-# kind, and both windows stay maximized. Then the switch from off to on, on
-# that /config (scenario 6 ends with the switch from on to off): the image
-# writes the pref again at every start, so it applies at once.
+# kind, and both windows stay maximized. Then the switch from off to on, on a
+# /config that had private browsing off (scenario 6 ends with the switch from
+# on to off): the image writes the pref again at every start, so it applies at
+# once.
 # The shards after 10a each start a fresh container with private browsing
 # off, and first make the tabs, windows and cookies their checks start from,
 # with the same actions the checks before them use, each waited for
@@ -2033,21 +2125,12 @@ check_indicator() {
 SC10_NORMAL_TABS="main popup popup-plain blank shift-click"
 SC10_PRIVATE_TABS="private context-link other"
 
-# The profile is kept across a restart; then the switch from off to on.
+# The profile is kept across a restart.
 scenario_10a() {
-    echo "== scenario 10a: private browsing off: the profile is kept; then on"
+    echo "== scenario 10a: private browsing off: the profile is kept"
     FIREFOX_ARGS=("${OFF_ARGS[@]}")
     check_restart off e2e-main "1 or more"
     check_prefs
-    stop_firefox
-    # Off to on: the profile above, now private. A private session has its own
-    # cookie jar, so the cookie the normal session kept does not show.
-    FIREFOX_ARGS=("${SERVICE_ARGS[@]}")
-    start_firefox_windowed blank-page.html "e2e blank page" -v "$WORK/profile-off:/config"
-    check_indicator off-to-on-indicator yes
-    start_web_server "$E2E_DIR"
-    title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page cookies") || true
-    check_kept off-to-on-cookie "e2e cookie page cookies=none" "$title"
     # Nothing is read after this: the EXIT trap removes the container.
 }
 
@@ -2163,13 +2246,11 @@ scenario_10d() {
         in_x xdotool key ctrl+shift+p
 }
 
-# No indicator with private browsing off; Quit & Restart reopens the normal
-# window's tabs and keeps the cookie.
+# Quit & Restart reopens the normal window's tabs and keeps the cookie.
 scenario_10e() {
-    echo "== scenario 10e: private browsing off: no indicator; Quit & Restart"
+    echo "== scenario 10e: private browsing off: Quit & Restart"
     FIREFOX_ARGS=("${OFF_ARGS[@]}")
     start_firefox_windowed
-    check_indicator no-private-indicator no
     # The cookie e2e-main, the normal window's tabs 10c's checks leave (their
     # pop-ups' tabs are the ones session restore must bring back:
     # docs/agents_output/debugging/session-restore-adopted-tab.md), and the new
@@ -2232,6 +2313,42 @@ scenario_10f() {
     start_web_server "$WORK/web"
     check_torrent_download off-torrent-download "$WORK/downloads-off"
     check_clean_stop off-clean-stop
+}
+
+# The switch from off to on: a /config of its own with the cookie e2e-main
+# from a normal session (10a checks that a container restart keeps it), now
+# private. A private session has its own cookie jar, so the kept cookie does
+# not show. That is meaningful only if the profile holds the cookie, so the
+# setup reads it from the stopped profile's cookies.sqlite first.
+scenario_10g() {
+    echo "== scenario 10g: private browsing off, then on"
+    local profile=$WORK/profile-off-to-on
+    FIREFOX_ARGS=("${OFF_ARGS[@]}")
+    mkdir -p "$profile"
+    chmod 0777 "$profile" # the image takes /config over for its user
+    start_firefox_windowed blank-page.html "e2e blank page" -v "$profile:/config"
+    start_web_server "$E2E_DIR"
+    setup_load off-main-cookie "$WINDOW" "http://127.0.0.1:$WEB_PORT/cookie-page.html" \
+        "e2e cookie page cookies" || return 0
+    stop_firefox
+    setup_step off-cookie-kept "the cookie e2e-main in the stopped profile's cookies.sqlite" \
+        profile_has_cookie "$profile" e2e-main || return 0
+    FIREFOX_ARGS=("${SERVICE_ARGS[@]}")
+    start_firefox_windowed blank-page.html "e2e blank page" -v "$profile:/config"
+    check_indicator off-to-on-indicator yes
+    start_web_server "$E2E_DIR"
+    title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page cookies") || true
+    check_kept off-to-on-cookie "e2e cookie page cookies=none" "$title"
+}
+
+# No indicator with private browsing off. Alone in its container: before the
+# icon has shown in this process, the absence read takes its full 15 s
+# (indicator_absent_wait).
+scenario_10h() {
+    echo "== scenario 10h: private browsing off: no indicator"
+    FIREFOX_ARGS=("${OFF_ARGS[@]}")
+    start_firefox_windowed
+    check_indicator no-private-indicator no
 }
 
 # The image writes an FF_PREF_* value into prefs.js as it is, and Firefox takes
