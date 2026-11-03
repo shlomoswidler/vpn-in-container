@@ -473,8 +473,8 @@ fetches an unpinned BuildKit frontend and builds on Alpine 3.18.
 
 ```bash
 tests/run-all.sh       # the unit tests and the stack, e2e, browser and qBittorrent suites
-                       # below (not the disruptive ones), all at the same time (about 3
-                       # minutes); each suite's log in one directory;
+                       # below (not the disruptive ones), all at the same time (about a
+                       # minute); each suite's log in one directory;
                        # `tests/run-all.sh e2e browser` runs only those
 tests/stack/run.sh     # the running stack: VPN egress and kill switch, DNS, port forwarding,
                        # qSticky, qBittorrent (API, settings, watch folder), Firefox, Autoheal
@@ -483,7 +483,7 @@ tests/e2e/run.sh       # Firefox in throwaway containers: cursors, single window
                        # on and off (and switching), downloads, WebRTC, sound to the web UI's
                        # audio stream, no telemetry with the service's policies; its
                        # scenarios run in groups at the same time (the long ones,
-                       # 1, 5, 6 and 10, as shards: 1a-1c, 5a-5d, 6m 6s, 10a-10f,
+                       # 1, 5, 6 and 10, as shards: 1a-1c, 5a-5e, 6m 6s, 10a-10h,
                        # each in containers of its own), and `tests/e2e/run.sh 7 8`
                        # runs only scenarios 7 and 8 (`... 5` all of 5's shards,
                        # `... 10c` one)
