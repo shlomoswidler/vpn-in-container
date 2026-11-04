@@ -188,6 +188,14 @@ services:
       # the VPN could reach only those anyway (tests/e2e/run.sh scenario 8).
       - FF_PREF_WEBRTC_DEFAULT_ADDRESS=media.peerconnection.ice.default_address_only=true
       - FF_PREF_WEBRTC_NO_HOST=media.peerconnection.ice.no_host=true
+      # A bigger audio output buffer for Web Audio and WebRTC (4096 frames: Firefox asks
+      # PulseAudio for 185.76 ms instead of 49.98 ms). With the default, Firefox's stream
+      # underruns when the host's CPUs are busy, and each underrun drops whole 10 ms blocks of
+      # sound from what the web UI plays; measured with tests/e2e/run.sh scenario 9 under load:
+      # 0 underruns in 39 runs against frequent ones with the default. The cost: about 136 ms
+      # more output latency for Web Audio and WebRTC (a call's voice, a game's sounds). An
+      # <audio> element's own stream asked for 200 ms with the default already.
+      - FF_PREF_AUDIO_OUTPUT_BUFFER=media.cubeb_latency_mtg_frames=4096
       # Marker cursor theme (mounted below): each cursor names a CSS cursor keyword, and the
       # patched noVNC shows the viewer's own native cursor for it (see config/cursors/README.md).
       # The size must match NOMINAL_SIZE in config/cursors/generate_native_theme.py.

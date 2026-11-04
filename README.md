@@ -268,6 +268,14 @@ The stream is raw 44.1 kHz stereo, about 1.4 Mbit/s, sent while sound is on (sil
 included), over the same loopback-only port 5800. Everyone viewing the web UI hears the same
 sound.
 
+Firefox plays Web Audio and WebRTC sound (a page's sound effects, a video call's voices)
+with a bigger output buffer than its default: `FF_PREF_AUDIO_OUTPUT_BUFFER`
+(`media.cubeb_latency_mtg_frames=4096`) in `docker-compose.yml`, so Firefox asks PulseAudio
+for 185.76 ms instead of 49.98 ms. With the default, a busy host (all CPUs loaded) made
+Firefox's stream run dry, and each time whole 10 ms blocks of that sound were left out of
+what the web UI plays (measured: 0 such underruns in 39 loaded test runs with the bigger
+buffer, frequent ones without it). The cost is about 136 ms more delay for that sound.
+
 Why the container's Firefox does not allow sites to autoplay sound
 (`media.autoplay.default` stays at Firefox's default, 1: block audible autoplay): with it
 allowed, any page, an ad included, could start making noise in every open web UI tab. The
