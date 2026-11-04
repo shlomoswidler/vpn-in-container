@@ -335,13 +335,18 @@ class CommittedOverlayTests(unittest.TestCase):
         with self.assertRaisesRegex(overlays.PatchError, r"core/util/cursor\.js` line"):
             overlays.recorded_sha256(moved)
 
-    def test_the_ui_patch_only_adds_the_reconnect_branch(self):
-        # Minimal: nothing upstream is removed, and the added lines are one else-if branch,
-        # after the first-interaction listener, that restores audio from the volume slider.
-        lines = UI.patch_file.read_bytes().splitlines()
+    def test_the_ui_patch_only_adds_the_reconnect_branch_and_the_sound_start_check(self):
+        # Minimal: nothing upstream is removed. The first hunk is one else-if branch, after the
+        # first-interaction listener, that restores audio from the volume slider; the other
+        # three add the sound-start check: the method (before updateAudio), its call where
+        # updateAudio turns sound on, and the timer cleared where it turns sound off.
+        text = UI.patch_file.read_bytes()
+        lines = text.splitlines()
         removed = [line for line in lines[2:] if line.startswith(b"-")]
-        added = [line[1:].strip() for line in lines[2:] if line.startswith(b"+")]
         self.assertEqual(removed, [])
+        hunks = [hunk.splitlines()[1:] for hunk in text.split(b"\n@@ ")[1:]]
+        self.assertEqual(len(hunks), 4)
+        added = [line[1:].strip() for line in hunks[0] if line.startswith(b"+")]
         self.assertEqual(added[0], b"} else if (UI.audioContext) {")
         self.assertEqual(added[-1], b"UI.updateAudioVolume();")
         self.assertTrue(all(line.startswith(b"//") for line in added[1:-1]))
@@ -352,6 +357,22 @@ class CommittedOverlayTests(unittest.TestCase):
         self.assertLess(connect, branch)
         self.assertLess(branch, disconnect)
         self.assertLess(patched.index("UI.audioContext.firstInteractionHandled = true;"), branch)
+        # The sound-start check: defined once, called once where sound is turned on (after the
+        # player starts), its timer cleared once where sound is turned off.
+        self.assertEqual(patched.count("    checkAudioStarted() {"), 1)
+        self.assertEqual(patched.count("UI.checkAudioStarted();"), 1)
+        self.assertEqual(patched.count("clearTimeout(UI.audioContext.startCheckTimer);"), 2)
+        self.assertIn('AUDIO_START_MESSAGE: "Sound did not start. Reload the page, then click in it.",',
+                      patched)
+        self.assertIn("AUDIO_START_TIMEOUT: 5000,", patched)
+        update = patched.index("    updateAudio() {")
+        self.assertLess(patched.index("    checkAudioStarted() {"), update)
+        start = patched.index("UI.audioContext.player.start();", update)
+        call = patched.index("UI.checkAudioStarted();", update)
+        stop = patched.index("UI.audioContext.player.stop();", update)
+        self.assertLess(start, call)
+        self.assertLess(call, stop)
+        self.assertLess(patched.index("clearTimeout(UI.audioContext.startCheckTimer);", call), stop)
 
     def test_the_kill_patch_changes_the_quit_key_and_lints_the_wait(self):
         # The key press and the comment line naming it are replaced, and the wait loop is the

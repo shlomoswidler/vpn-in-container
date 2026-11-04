@@ -1943,6 +1943,37 @@ const UI = {
         UI.updateAudio();
     },
 
+    // Firefox sometimes never starts the AudioContext, even after a click
+    // that allows it (only a reload of the page brings sound back): if sound
+    // is on and the AudioContext is still not running AUDIO_START_TIMEOUT ms
+    // after sound was turned on, tell the user so.
+    AUDIO_START_TIMEOUT: 5000,
+    AUDIO_START_MESSAGE: "Sound did not start. Reload the page, then click in it.",
+
+    checkAudioStarted() {
+        clearTimeout(UI.audioContext.startCheckTimer);
+        UI.audioContext.startCheckTimer = setTimeout(() => {
+            const ctx = UI.audioContext.player.audioCtx;
+            if (!UI.audioContext.audioEnabled || !UI.connected || !ctx ||
+                ctx.state === 'running') {
+                return;
+            }
+            UI.showStatus(UI.AUDIO_START_MESSAGE, 'warn', 15000);
+            // If it starts after all, take the message back (unless another
+            // status has replaced it).
+            const onStateChange = () => {
+                if (ctx.state !== 'running') return;
+                ctx.removeEventListener('statechange', onStateChange);
+                const statusElem = document.getElementById('noVNC_status');
+                if (statusElem.classList.contains("noVNC_open") &&
+                    statusElem.textContent === UI.AUDIO_START_MESSAGE) {
+                    UI.hideStatus();
+                }
+            };
+            ctx.addEventListener('statechange', onStateChange);
+        }, UI.AUDIO_START_TIMEOUT);
+    },
+
     updateAudio() {
         if (!UI.audioContext) return;
 
@@ -2018,6 +2049,9 @@ const UI = {
             // Make sure the PCM player is started.
             UI.audioContext.player.start();
 
+            // Tell the user if the browser does not start the sound.
+            UI.checkAudioStarted();
+
             // Set the volume value.
             UI.audioContext.player.volume(volume / 100);
 
@@ -2035,6 +2069,9 @@ const UI = {
 
             // Cancel any pending reconnect so a late timer cannot reopen the socket.
             clearAudioReconnectTimer();
+
+            // Sound is off: there is no start to check.
+            clearTimeout(UI.audioContext.startCheckTimer);
 
             // Close the WebSocket connection.
             if (UI.audioContext.webSocket) {
