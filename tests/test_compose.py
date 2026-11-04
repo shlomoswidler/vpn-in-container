@@ -715,6 +715,15 @@ class ComposeTests(unittest.TestCase):
         prefs = {v for k, v in environment.items() if k.startswith("FF_PREF_")}
         self.assertLessEqual(FIREFOX_PREFS, prefs)
 
+    def test_firefox_plays_web_audio_with_a_bigger_output_buffer(self):
+        # With Firefox's default it asks PulseAudio for 49.98 ms, and its stream underruns when the
+        # host's CPUs are busy, and each underrun drops 10 ms blocks from the web UI's sound.
+        # 4096 frames (185.76 ms) had none in 39 loaded runs of tests/e2e/run.sh scenario 9.
+        environment = self.services["firefox"].get("environment", {})
+        self.assertEqual(
+            environment.get("FF_PREF_AUDIO_OUTPUT_BUFFER"), "media.cubeb_latency_mtg_frames=4096"
+        )
+
     def test_firefox_streams_its_audio_to_the_web_ui(self):
         # The image's default is 0: no PulseAudio server, no recorder, no /websockify-audio,
         # and the web UI hides its audio controls, so pages play without sound.
