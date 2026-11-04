@@ -572,8 +572,15 @@ scenario_2() {
 # (FF_PREF_NO_URLBAR_AUTOFILL, test only), so a URL type_url types is all it
 # holds (see there).
 start_firefox_windowed() {
-    local page=${1:-blank-page.html} title=${2:-e2e blank page} deadline
+    local web="" page title deadline
+    if [[ "${1:-}" == --web ]]; then
+        web=$2
+        shift 2
+    fi
+    page=${1:-blank-page.html}
+    title=${2:-e2e blank page}
     shift $(($# < 2 ? $# : 2))
+    WEB_SERVING=""
     docker rm -f -v "$PROBE_CONTAINER" "$CONTAINER" >/dev/null 2>&1 || true
     firefox_started
     docker run -d --rm --name "$CONTAINER" --network none "${NO_DNS_ARGS[@]}" \
@@ -586,6 +593,9 @@ start_firefox_windowed() {
         "$IMAGE" >/dev/null
     follow_start_log
     start_probe
+    if [[ -n "$web" ]] && ! launch_web_server "$web"; then
+        WEB_SERVING="" # start_web_server tries again, and says why if it fails
+    fi
     echo "waiting for Firefox to show $page..."
     WINDOW=""
     deadline=$((SECONDS + 90))
@@ -1581,14 +1591,21 @@ scenario_5d() {
 
 # Serves the files in DIR on 127.0.0.1:WEB_PORT in the test container's network
 # namespace (torrent_server.py; the container still has no network), and waits
-# until it answers.
+# until it answers. start_firefox_windowed --web DIR has started it already, so
+# that it starts while Firefox does (WEB_SERVING is the DIR it serves, or "").
 WEB_PORT=8765 # download-page.html links to this port
-start_web_server() {
-    local deadline=$((SECONDS + 30))
+WEB_SERVING=""
+launch_web_server() {
+    WEB_SERVING=""
     docker rm -f -v "$CONTAINER-web" >/dev/null 2>&1 || true
     docker run -d --rm --name "$CONTAINER-web" --network "container:$CONTAINER" \
         -v "$E2E_DIR:/e2e:ro" -v "$1:/srv:ro" "$PROBE_IMAGE" \
-        python -I /e2e/torrent_server.py "$WEB_PORT" /srv >/dev/null
+        python -I /e2e/torrent_server.py "$WEB_PORT" /srv >/dev/null || return 1
+    WEB_SERVING=$1
+}
+start_web_server() {
+    local deadline=$((SECONDS + 30))
+    [[ "$WEB_SERVING" == "$1" ]] || launch_web_server "$1"
     until docker exec "$CONTAINER" wget -q -O /dev/null "http://127.0.0.1:$WEB_PORT/" 2>/dev/null; do
         if ((SECONDS >= deadline)); then
             docker logs "$CONTAINER-web" 2>&1 | sed 's/^/      /'
@@ -1603,9 +1620,14 @@ start_web_server() {
 # so it saves the profile. Waits until Docker has removed it (--rm), so its
 # name is free again.
 stop_firefox() {
-    local deadline=$((SECONDS + 60))
-    docker rm -f -v "$CONTAINER-web" "$PROBE_CONTAINER" >/dev/null 2>&1 || true
+    local deadline=$((SECONDS + 60)) remover
+    # The page server and the probe go while the test container stops: Firefox's
+    # shutdown needs neither.
+    docker rm -f -v "$CONTAINER-web" "$PROBE_CONTAINER" >/dev/null 2>&1 &
+    remover=$!
+    WEB_SERVING=""
     docker stop "$CONTAINER" >/dev/null
+    wait "$remover" || true
     while docker inspect "$CONTAINER" >/dev/null 2>&1; do
         if ((SECONDS >= deadline)); then
             end_run container-removed "$CONTAINER was not removed within 60 s after it stopped"
@@ -1814,7 +1836,7 @@ check_restart() {
     shift 3
     mkdir -p "$profile"
     chmod 0777 "$profile" # the image takes /config over for its user
-    start_firefox_windowed blank-page.html "e2e blank page" -v "$profile:/config" "$@"
+    start_firefox_windowed --web "$E2E_DIR" blank-page.html "e2e blank page" -v "$profile:/config" "$@"
     start_web_server "$E2E_DIR"
     title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page cookies") || true
     check_kept "$mode-first-visit" "e2e cookie page cookies=none" "$title"
@@ -1824,7 +1846,7 @@ check_restart() {
         count="1 or more"
     fi
     check_kept "$mode-history" "$visits" "$count"
-    start_firefox_windowed blank-page.html "e2e blank page" -v "$profile:/config" "$@"
+    start_firefox_windowed --web "$E2E_DIR" blank-page.html "e2e blank page" -v "$profile:/config" "$@"
     start_web_server "$E2E_DIR"
     title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page cookies") || true
     check_kept "$mode-cookie-restart" "e2e cookie page cookies=$kept" "$title"
@@ -1941,9 +1963,9 @@ sys.exit(not any(v["target"] == "/config/downloads" and not v.get("read_only") f
     fi
     mkdir -p "$WORK/downloads"
     chmod 0777 "$WORK/downloads" # Firefox runs as the image's user
-    start_firefox_windowed download-page.html "e2e download page" \
-        -v "$WORK/downloads:/config/downloads"
     make_test_torrent
+    start_firefox_windowed --web "$WORK/web" download-page.html "e2e download page" \
+        -v "$WORK/downloads:/config/downloads"
     start_web_server "$WORK/web"
     check_torrent_download torrent-download "$WORK/downloads"
 }
@@ -2066,11 +2088,30 @@ firefox_pulse_server() {
 # Prints how many of Firefox's sockets are the client end of a connection to
 # PulseAudio: unix_peers_probe.py lists those ends, and /proc/PID/fd links to
 # each socket a process holds. Fails if nothing listens on PulseAudio's socket.
+# An fd that Firefox closes while it is listed is left out (`ls -l` warned
+# "No such file or directory" about one but still succeeded, and the warning
+# ended up in the count): the listing prints only the links it read, skips an
+# fd whose link is gone (that error only), and fails on any other error, which
+# this function then prints on its output.
 firefox_pulse_connections() {
-    local clients held
+    local clients links held
     clients=$(probe unix_peers_probe.py /tmp/pulseaudio.sock) || return 1
-    held=$(docker exec -u 1000:1000 "$CONTAINER" ls -l "/proc/$FIREFOX_PID/fd" |
-        sed -n 's/.*socket:\[\([0-9]*\)\].*/\1/p') || return 1
+    links=$(docker exec -u 1000:1000 "$CONTAINER" sh -c '
+cd "/proc/$1/fd" || exit 1
+for fd in *; do
+    if link=$(readlink -v "$fd" 2>&1); then
+        echo "$link"
+    else
+        case $link in
+            *": No such file or directory") ;;
+            *) echo "$link" >&2 && exit 1 ;;
+        esac
+    fi
+done' fd_links "$FIREFOX_PID" 2>&1) || {
+        echo "Firefox's fds could not be listed: $links"
+        return 1
+    }
+    held=$(sed -n 's/^socket:\[\([0-9]*\)\]$/\1/p' <<<"$links")
     python3 -I -c '
 import json, sys
 clients = json.loads(sys.argv[1])
@@ -2085,7 +2126,9 @@ print(sum(1 for inode in clients["clients"] if str(inode) in held))
 check_firefox_pulse() {
     local label=$1 min=$2 max=$3 count
     checks=$((checks + 1))
-    if ! count=$(firefox_pulse_connections 2>&1); then
+    # A count that is not a number (anything else on the output) fails the
+    # check instead of reaching the arithmetic, which set -u would abort on.
+    if ! count=$(firefox_pulse_connections 2>&1) || [[ ! "$count" =~ ^[0-9]+$ ]]; then
         printf 'FAIL  %-22s %s\n' "$label" "$count"
         failures=$((failures + 1))
     elif ((min <= count && count <= max)); then
@@ -2202,7 +2245,7 @@ scenario_10a() {
 scenario_10b() {
     echo "== scenario 10b: private browsing off: private windows on request"
     FIREFOX_ARGS=("${OFF_ARGS[@]}")
-    start_firefox_windowed
+    start_firefox_windowed --web "$E2E_DIR"
     start_web_server "$E2E_DIR"
     # The normal window's cookie e2e-main, which off-normal-cookies must find
     # (10a checks that the profile keeps it): cookie-page.html sets it.
@@ -2314,7 +2357,7 @@ scenario_10d() {
 scenario_10e() {
     echo "== scenario 10e: private browsing off: Quit & Restart"
     FIREFOX_ARGS=("${OFF_ARGS[@]}")
-    start_firefox_windowed
+    start_firefox_windowed --web "$E2E_DIR"
     # The cookie e2e-main, the normal window's tabs 10c's checks leave (their
     # pop-ups' tabs are the ones session restore must bring back:
     # docs/agents_output/debugging/session-restore-adopted-tab.md), and the new
@@ -2379,10 +2422,11 @@ scenario_10i() {
     FIREFOX_ARGS=("${OFF_ARGS[@]}")
     mkdir -p "$WORK/downloads-off"
     chmod 0777 "$WORK/downloads-off"
-    start_firefox_windowed blank-page.html "e2e blank page" -v "$WORK/downloads-off:/config/downloads"
+    make_test_torrent
+    start_firefox_windowed --web "$WORK/web" blank-page.html "e2e blank page" \
+        -v "$WORK/downloads-off:/config/downloads"
     setup_load off-download-page "$WINDOW" file:///e2e/download-page.html "e2e download page" ||
         return 0
-    make_test_torrent
     start_web_server "$WORK/web"
     check_torrent_download off-torrent-download "$WORK/downloads-off"
     check_clean_stop off-clean-stop
@@ -2399,7 +2443,7 @@ scenario_10g() {
     FIREFOX_ARGS=("${OFF_ARGS[@]}")
     mkdir -p "$profile"
     chmod 0777 "$profile" # the image takes /config over for its user
-    start_firefox_windowed blank-page.html "e2e blank page" -v "$profile:/config"
+    start_firefox_windowed --web "$E2E_DIR" blank-page.html "e2e blank page" -v "$profile:/config"
     start_web_server "$E2E_DIR"
     setup_load off-main-cookie "$WINDOW" "http://127.0.0.1:$WEB_PORT/cookie-page.html" \
         "e2e cookie page cookies" || return 0
@@ -2407,7 +2451,7 @@ scenario_10g() {
     setup_step off-cookie-kept "the cookie e2e-main in the stopped profile's cookies.sqlite" \
         profile_has_cookie "$profile" e2e-main || return 0
     FIREFOX_ARGS=("${SERVICE_ARGS[@]}")
-    start_firefox_windowed blank-page.html "e2e blank page" -v "$profile:/config"
+    start_firefox_windowed --web "$E2E_DIR" blank-page.html "e2e blank page" -v "$profile:/config"
     check_indicator off-to-on-indicator yes
     start_web_server "$E2E_DIR"
     title=$(load_url "http://127.0.0.1:$WEB_PORT/cookie-page.html" "e2e cookie page cookies") || true
