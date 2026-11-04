@@ -1367,12 +1367,101 @@ check_not_restarted() {
     fi
 }
 
-# Opens Firefox's main menu (the ☰ button at the right end of the toolbar) and
-# chooses its last item, Quit & Restart (Up from the menu's start wraps to it),
-# then runs xdotool with any arguments given.
+# Prints the id of an open panel: a visible window of the type Firefox gives
+# its panels (the main menu is one), _NET_WM_WINDOW_TYPE_UTILITY (its menus are
+# _NET_WM_WINDOW_TYPE_POPUP_MENU, see menu_open). Fails if there is none. One
+# docker exec (in_x's).
+panel_window() {
+    docker exec -u 1000 -e DISPLAY=:0 "$CONTAINER" sh -c '
+        for window in $(xdotool search --onlyvisible --name . 2>/dev/null); do
+            if obxprop --id "$window" 2>/dev/null | grep -q _NET_WM_WINDOW_TYPE_UTILITY; then
+                echo "$window"
+                exit 0
+            fi
+        done
+        exit 1'
+}
+
+# color_pixels X Y W H RRGGBB TOLERANCE: prints how many pixels of the screen
+# region are within TOLERANCE of the color (count_color), or 0 if the probe
+# fails. Call need_probe first.
+color_pixels() {
+    local summary pixels
+    summary=$(count_color "$@") || summary=""
+    pixels=$(sed -n 's/.*"matches": \([0-9]*\).*/\1/p' <<<"$summary")
+    echo "${pixels:-0}"
+}
+
+# Quit & Restart's question (single-window.cfg) is a dialog inside the browser
+# window, with no window of its own. Its default button, Quit & Restart, has
+# the accent color of the image's dark theme (DARK_MODE=1), #00CADB: measured
+# on v26.09.1, 3687 such pixels at 1920x1080, near the top middle of the
+# screen, and none in the screenshots without the dialog. Firefox shows the
+# dialog only after it has moved the focus into it (SubDialog.sys.mjs,
+# resizeDialog), so a key pressed once it shows reaches it.
+QUESTION_MIN=1000
+# quit_restart_answer KEY: waits up to 15 s until Quit & Restart's question
+# shows, then answers it with KEY (Return: Quit & Restart; Escape: Cancel).
+# Fails, without pressing KEY, if it does not show.
+quit_restart_answer() {
+    local deadline
+    need_probe
+    deadline=$((SECONDS + 15))
+    until (($(color_pixels "$((DISPLAY_W / 4))" 0 "$((DISPLAY_W / 2))" "$((DISPLAY_H / 3))" \
+        00cadb 16) >= QUESTION_MIN)); do
+        ((SECONDS < deadline)) || return 1
+        sleep 0.2
+    done
+    in_x xdotool key "$1"
+}
+
+# The item of the main menu that the keyboard selected has a focus ring,
+# #3584E4: measured on v26.09.1, 1232 such pixels around Quit & Restart, the
+# last item, whose bottom is 14 px above the bottom of the menu's window, and
+# none while no item is selected.
+SELECTED_MIN=500
+# appmenu_last_item KEY: opens Firefox's main menu (the ☰ button at the right
+# end of the toolbar), selects its last item, Quit & Restart, with End, chooses
+# it with Return, and answers its question with KEY (quit_restart_answer).
+# Each key waits for what it acts on to show, not a fixed time: right after
+# Firefox starts, under load, Firefox stalled for seconds and then handled the
+# click and the keys pressed meanwhile all at once. The menu takes no key until
+# it has opened (PanelMultiView.sys.mjs: keys go through only once its view is
+# active, at "popupshown"), and its window shows before that: a key handled in
+# between did nothing, so End is pressed again (every 2 s) until the last item
+# shows as selected. End only selects the last item, so pressing it again
+# chooses nothing. Return, pressed once, is the key that chooses. A Return that
+# came before the question had the focus was lost, which left the question
+# open (and the window-modal question disables Firefox's keys, the shutdown
+# key too). docs/agents_output/debugging/e2e-appmenu-quit-restart.md
 appmenu_last_item() {
-    in_x xdotool mousemove "$((DISPLAY_W - 25))" 63 click 1 sleep 1.5 key Up sleep 0.5 key Return \
-        "$@"
+    local deadline next_end=0 panel geometry x y width height
+    need_probe
+    in_x xdotool mousemove "$((DISPLAY_W - 25))" 63 click 1 || return 1
+    deadline=$((SECONDS + 15))
+    until panel=$(panel_window); do
+        ((SECONDS < deadline)) || return 1
+        sleep 0.2
+    done
+    geometry=$(in_x xdotool getwindowgeometry --shell "$panel") || return 1
+    x=$(sed -n 's/^X=//p' <<<"$geometry")
+    y=$(sed -n 's/^Y=//p' <<<"$geometry")
+    width=$(sed -n 's/^WIDTH=//p' <<<"$geometry")
+    height=$(sed -n 's/^HEIGHT=//p' <<<"$geometry")
+    deadline=$((SECONDS + 15))
+    while :; do
+        if ((SECONDS >= next_end)); then
+            in_x xdotool key End || return 1
+            next_end=$((SECONDS + 2))
+        fi
+        if (($(color_pixels "$x" "$((y + height - 60))" "$width" 60 3584e4 16) >= SELECTED_MIN)); then
+            break
+        fi
+        ((SECONDS < deadline)) || return 1
+        sleep 0.2
+    done
+    in_x xdotool key Return || return 1
+    quit_restart_answer "$1"
 }
 
 # check_no_window_menu LABEL: Alt+W opens no menu (the Window menu's access
@@ -1610,7 +1699,7 @@ scenario_5c() {
 scenario_5d() {
     echo "== scenario 5d: Firefox stays one maximized window (main menu's Quit & Restart, shutdown key)"
     start_single_window
-    check_restarted appmenu-quit-restart private main appmenu_last_item sleep 1.5 key Return
+    check_restarted appmenu-quit-restart private main appmenu_last_item Return
     check_restarted shutdown-key private main in_x xdotool key ctrl+alt+shift+q
 }
 
