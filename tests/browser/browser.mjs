@@ -319,8 +319,15 @@ async function launchFirefox(binary, profile, port) {
                 await send('script.addPreloadScript', { functionDeclaration: source });
             },
             async close() {
-                // A hung browser never answers: stop it after SESSION_END_MS regardless.
-                await Promise.race([send('session.end').catch(() => {}), sleep(SESSION_END_MS)]);
+                // A hung browser never answers: stop it after SESSION_END_MS regardless. The
+                // timer is canceled once the race is decided: a pending one would keep this
+                // process running for the rest of SESSION_END_MS (5 s, measured).
+                const ended = new AbortController();
+                await Promise.race([
+                    send('session.end').catch(() => {}),
+                    sleep(SESSION_END_MS, undefined, { signal: ended.signal }).catch(() => {}),
+                ]);
+                ended.abort();
                 ws.close();
                 await stopBrowser(browser);
             },
