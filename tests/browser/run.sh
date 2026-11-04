@@ -58,6 +58,11 @@
 # prints which jobs were still running, stops everything it started and fails
 # (a headless browser can hang; see browser.mjs).
 #
+# Firefox runs from a copy of /Applications/Firefox.app in the run's temporary
+# directory (firefox-copy.sh), never from the app itself: a Firefox started
+# from the app would process the update the user's Firefox may have staged
+# there (and ask the user for an administrator's password to apply it).
+#
 # Usage: tests/browser/run.sh   (needs docker, python3, node, and Google
 #        Chrome and/or Firefox in /Applications)
 #        BROWSER_TIMEOUT_S=N overrides the time limit.
@@ -67,8 +72,12 @@ set -euo pipefail
 BROWSER_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$BROWSER_DIR/../.." && pwd)
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-FIREFOX="/Applications/Firefox.app/Contents/MacOS/firefox"
+FIREFOX_APP="/Applications/Firefox.app"
+# The test Firefox: the firefox binary of firefox_copy's copy of FIREFOX_APP.
+FIREFOX=""
 WORK=$(mktemp -d)
+# shellcheck source=tests/browser/firefox-copy.sh
+source "$BROWSER_DIR/firefox-copy.sh"
 SERVER_PID=""
 CONTAINER=""
 # Each job's web UI container is web-ui-PID-KIND-PART (web_ui_job sets it).
@@ -132,6 +141,7 @@ cleanup() {
     if ((${#WEB_CONTAINERS[@]} > 0)); then
         docker rm -f -v "${WEB_CONTAINERS[@]}" >/dev/null 2>&1 || true
     fi
+    [[ -z "$FIREFOX" ]] || firefox_copy_cleanup "$WORK"
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -211,7 +221,13 @@ print("\n".join(str(s.getsockname()[1]) for s in sockets))
 kinds=()
 binaries=()
 for kind in chrome firefox; do
-    if [[ "$kind" == chrome ]]; then binary=$CHROME; else binary=$FIREFOX; fi
+    if [[ "$kind" == chrome ]]; then
+        binary=$CHROME
+    else
+        [[ -x "$FIREFOX_APP/Contents/MacOS/firefox" ]] || continue
+        FIREFOX=$(firefox_copy "$FIREFOX_APP" "$WORK")
+        binary=$FIREFOX
+    fi
     [[ -x "$binary" ]] || continue
     kinds+=("$kind")
     binaries+=("$binary")
@@ -657,7 +673,7 @@ for i in ${kinds[@]+"${!kinds[@]}"}; do
 done
 
 if ((${#kinds[@]} == 0)); then
-    echo "FAIL  no browser found (looked for $CHROME and $FIREFOX)"
+    echo "FAIL  no browser found (looked for $CHROME and $FIREFOX_APP)"
     exit 1
 fi
 if ((failures > 0)); then
