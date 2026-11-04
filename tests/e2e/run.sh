@@ -190,11 +190,16 @@ WORK=$(mktemp -d)
 # server with nothing listening refuses at once, as a network that is down
 # would (docs/agents_output/debugging/shutdown-key-and-appmenu.md).
 NO_DNS_ARGS=(--dns 127.0.0.1 --dns-opt timeout:1 --dns-opt attempts:1)
-# The VNC probes (cursor and color) run in one long-lived container in the test
-# container's network namespace, started with each test container
-# (start_probe): a container per probe cost a start each (0.23 s against
-# 0.04 s for a docker exec, measured).
+# The probes (VNC cursor and color, audio WebSocket, PulseAudio peers) run in
+# one long-lived container in the test container's network namespace: a
+# container per probe cost a start each (0.23 s against 0.04 s for a docker
+# exec, measured). It starts with the first check that probes after each start
+# of the test container (need_probe), not with the start: most scenarios never
+# probe, and the starts of all the groups at once are what a run waits on
+# (docs/agents_output/fixes/e2e-lazy-probe.md).
 PROBE_CONTAINER="$CONTAINER-probe"
+# Exists while PROBE_CONTAINER runs for the test container now running.
+PROBE_MARK="$WORK/probe-up"
 # How often a wait for a container's start looks again (for its Firefox
 # window, and in scenarios 11 and 12 for what its start leads to): each look
 # is one docker exec or inspect (about 50 ms, measured), so a short interval
@@ -331,16 +336,30 @@ if ! [[ "$DISPLAY_W" =~ ^[0-9]+$ && "$DISPLAY_H" =~ ^[0-9]+$ ]]; then
     exit 1
 fi
 
-# Starts PROBE_CONTAINER in the network namespace of the test container that
-# was just started, with tests/e2e at /e2e and WORK at /out.
-start_probe() {
-    docker run -d --rm --name "$PROBE_CONTAINER" --network "container:$CONTAINER" \
-        -v "$E2E_DIR:/e2e:ro" -v "$WORK:/out" "$PROBE_IMAGE" sleep infinity >/dev/null
+# Starts PROBE_CONTAINER in the network namespace of the test container now
+# running, with tests/e2e at /e2e and WORK at /out, unless it runs already
+# (PROBE_MARK). Each check that probes calls it first, outside the command
+# substitution that runs the probe. A probe container that does not start
+# fails as check probe-start with Docker's error and ends the run, as
+# start_failed does: every probe after it needs it.
+need_probe() {
+    local error
+    [[ ! -e "$PROBE_MARK" ]] || return 0
+    if ! error=$(docker run -d --rm --name "$PROBE_CONTAINER" --network "container:$CONTAINER" \
+        -v "$E2E_DIR:/e2e:ro" -v "$WORK:/out" "$PROBE_IMAGE" sleep infinity 2>&1 >/dev/null); then
+        end_run probe-start "the probe container did not start: ${error:-(no output)}"
+    fi
+    : >"$PROBE_MARK"
 }
-# probe SCRIPT ARGS...: runs tests/e2e/SCRIPT in PROBE_CONTAINER.
+# probe SCRIPT ARGS...: runs tests/e2e/SCRIPT in PROBE_CONTAINER, which
+# need_probe has started.
 probe() {
     local script=$1
     shift
+    if [[ ! -e "$PROBE_MARK" ]]; then
+        echo "probe $script: the probe container was not started (need_probe)" >&2
+        return 1
+    fi
     docker exec "$PROBE_CONTAINER" python -I "/e2e/$script" "$@"
 }
 
@@ -352,6 +371,7 @@ start_firefox() {
         args+=("${arg/#$NATIVE_CSS_SOURCE:/$theme_dir:}")
     done
     docker rm -f -v "$PROBE_CONTAINER" "$CONTAINER" >/dev/null 2>&1 || true
+    rm -f "$PROBE_MARK"
     docker run -d --rm --name "$CONTAINER" --network none "${NO_DNS_ARGS[@]}" \
         --shm-size 1g \
         "${args[@]}" \
@@ -361,7 +381,6 @@ start_firefox() {
         -v "$E2E_DIR/cursor-page.html:/e2e/cursor-page.html:ro" \
         "$IMAGE" >/dev/null
     follow_start_log
-    start_probe
 
     echo "waiting for Firefox to show the test page..."
     deadline=$((SECONDS + 90))
@@ -424,6 +443,7 @@ checks=0
 # EXPECTED. "image:any" accepts an ordinary image of any size.
 check_cell() {
     local index=$1 expected=$2 column row x y summary actual
+    need_probe
     checks=$((checks + 1))
     column=$((index % COLUMNS))
     row=$((index / COLUMNS))
@@ -582,6 +602,7 @@ start_firefox_windowed() {
     shift $(($# < 2 ? $# : 2))
     WEB_SERVING=""
     docker rm -f -v "$PROBE_CONTAINER" "$CONTAINER" >/dev/null 2>&1 || true
+    rm -f "$PROBE_MARK"
     firefox_started
     docker run -d --rm --name "$CONTAINER" --network none "${NO_DNS_ARGS[@]}" \
         --shm-size 1g \
@@ -592,7 +613,6 @@ start_firefox_windowed() {
         -v "$E2E_DIR:/e2e:ro" \
         "$IMAGE" >/dev/null
     follow_start_log
-    start_probe
     if [[ -n "$web" ]] && ! launch_web_server "$web"; then
         WEB_SERVING="" # start_web_server tries again, and says why if it fails
     fi
@@ -617,6 +637,7 @@ start_firefox_windowed() {
 check_drag() {
     local label=$1 modifier=$2 button=$3 x=$4 y=$5 x2=$6 y2=$7 expected=$8
     local step summary actual geometry
+    need_probe
     checks=$((checks + 1))
     in_x xdotool mousemove "$x" "$y"
     sleep 0.5
@@ -669,6 +690,7 @@ scenario_3() {
 # Hovers (X,Y) and checks the cursor's classification equals EXPECTED.
 check_point() {
     local label=$1 x=$2 y=$3 expected=$4 summary actual
+    need_probe
     checks=$((checks + 1))
     summary=$(probe rfb_cursor_probe.py 127.0.0.1 5900 "$x" "$y" "/out/$label")
     actual=$(node "$E2E_DIR/decode.mjs" "$summary" "$WORK/$label.rgba")
@@ -1200,7 +1222,10 @@ count_color() {
 INDICATOR_MIN=50
 INDICATOR_SHOW_S=""
 read_indicator() {
-    local start=$SECONDS deadline=$((SECONDS + ${1:-15}))
+    local start deadline
+    need_probe
+    start=$SECONDS
+    deadline=$((SECONDS + ${1:-15}))
     while :; do
         INDICATOR=$(count_color 0 0 "$DISPLAY_W" 44 8000d7 16)
         INDICATOR_PIXELS=$(sed -n 's/.*"matches": \([0-9]*\).*/\1/p' <<<"$INDICATOR")
@@ -1625,6 +1650,7 @@ stop_firefox() {
     # shutdown needs neither.
     docker rm -f -v "$CONTAINER-web" "$PROBE_CONTAINER" >/dev/null 2>&1 &
     remover=$!
+    rm -f "$PROBE_MARK"
     WEB_SERVING=""
     docker stop "$CONTAINER" >/dev/null
     wait "$remover" || true
@@ -2125,6 +2151,7 @@ print(sum(1 for inode in clients["clients"] if str(inode) in held))
 # check_firefox_pulse LABEL MIN MAX: Firefox holds MIN to MAX PulseAudio connections.
 check_firefox_pulse() {
     local label=$1 min=$2 max=$3 count
+    need_probe
     checks=$((checks + 1))
     # A count that is not a number (anything else on the output) fails the
     # check instead of reaching the arithmetic, which set -u would abort on.
@@ -2173,6 +2200,7 @@ scenario_9() {
     check_audio firefox-pulse-server firefox_pulse_server
     # Negative controls for the checks after the click: nothing plays yet, and
     # Firefox has no PulseAudio connection (it connects when a page plays sound).
+    need_probe # for ws_audio, which check_audio runs in a command substitution
     check_audio audio-silence-before ws_audio 3 silence
     check_firefox_pulse firefox-pulse-before 0 0
     in_x xdotool windowactivate --sync "$WINDOW" \
