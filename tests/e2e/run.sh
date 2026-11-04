@@ -91,15 +91,15 @@
 # closed) restarts Firefox with a fresh normal window, a .torrent link still
 # downloads into /config/downloads, and `docker stop` quits Firefox cleanly.
 # Then the switch from off to on: on a /config that had private browsing off,
-# with private browsing on, the indicator is shown and the kept cookie is not. It runs as eight shards, each
-# in a fresh container: 10a the kept profile; 10b the first private windows and
-# their cookies; 10c pop-ups and new windows from both windows; 10d switching
-# between the windows and closing the private one; 10e Quit & Restart; 10f
-# closing the last window, the download and the clean stop; 10g the switch to
-# on, on a /config of its own; 10h no indicator. Each shard first makes the
-# tabs, windows and cookies its checks start from, with the same actions the
-# scenario used before them, and stops with a FAIL if one of those steps does
-# not show its result.
+# with private browsing on, the indicator is shown and the kept cookie is not.
+# It runs as nine shards, each in a fresh container: 10a the kept profile; 10b
+# the first private windows and their cookies; 10c pop-ups and new windows from
+# both windows; 10d switching between the windows and closing the private one;
+# 10e Quit & Restart; 10f closing the last window; 10g the switch to on, on a
+# /config of its own; 10h no indicator; 10i the download and the clean stop.
+# Each shard first makes the tabs, windows and cookies its checks start from,
+# with the same actions the scenario used before them, and stops with a FAIL if
+# one of those steps does not show its result.
 #
 # Scenario 11 checks that a FIREFOX_PRIVATE_BROWSING other than true or false
 # stops the container at start, with the reason in its log, before the image
@@ -129,22 +129,23 @@ E2E_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$E2E_DIR/../.." && pwd)
 SELF="$E2E_DIR/$(basename "$0")"
 # The scenario ids: a shard of a scenario is its number and a letter.
-ALL_SCENARIOS="1a 1b 1c 2 3 4 5a 5b 5c 5d 5e 6m 6s 7 8 9 10a 10b 10c 10d 10e 10f 10g 10h 11 12"
+ALL_SCENARIOS="1a 1b 1c 2 3 4 5a 5b 5c 5d 5e 6m 6s 7 8 9 10a 10b 10c 10d 10e 10f 10g 10h 10i 11 12"
 # The groups a run without arguments starts, one process each, all at the same
 # time, so the run takes as long as its longest group: each group of more than
 # one scenario holds short ones that run one after another. Each group must
 # hold every scenario another of its scenarios continues from (4 needs 3); no
 # shard continues from another. Measured on a Mac with 16 CPUs (OrbStack: 16
-# CPUs, 31 GB), in seconds, the range in three runs of all the groups at once
-# (45-46 s for the whole run), then in two runs of tests/run-all.sh, which
-# runs every suite at once (58 s for it, e2e's groups 56 s): 1a 37-39, 44-47;
-# 1b 38-39, 43-45; 1c 33-35, 43-44; 2 7 8 42, 52; 3 4 37-40, 44-48; 5a 33-37,
-# 45; 5b 33-36, 45-47; 5c 35-36, 42-43; 5d 30-33, 39-43; 5e 38, 45-47; 6m
-# 43-44, 53-55; 6s 29, 37-38; 9 11 12 43-45, 51-54; 10a 29-30, 40-41; 10b
-# 41-42, 52-53; 10c 43-45, 55-56; 10d 39-41, 48-50; 10e 32-33, 42-44; 10f
-# 45-46, 55-56; 10g 28-29, 39-40; 10h 29-31, 31.
-SCENARIO_GROUPS=("1a" "1b" "1c" "2 7 8" "3 4" "5a" "5b" "5c" "5d" "5e" "6m" "6s" "9 11 12"
-    "10a" "10b" "10c" "10d" "10e" "10f" "10g" "10h")
+# CPUs, 31 GB), with other work keeping the load average at 27-46, in seconds,
+# the range in three runs of all the groups at once (48-54 s for the whole
+# run), then in four runs of tests/run-all.sh, which runs every suite at once
+# (59-67 s for e2e): 1a 39-44, 47-53; 1b 41-42, 47-52; 1c 35-40, 47-50; 2 7 8
+# 47-51, 56-61; 3 4 44-45, 52-58; 5a 41-43, 50-53; 5b 36-41, 45-54; 5c 35-39,
+# 46-51; 5d 35-37, 41-46; 5e 38-42, 47-54; 6m 46-53, 57-65; 6s 29-34, 44-49;
+# 9 11 30-33, 37-45; 12 24-25, 30-36; 10a 33-38, 45-51; 10b 46-47, 55-60; 10c
+# 41-45, 50-56; 10d 41-44, 49-56; 10e 38-39, 47-52; 10f 41-45, 51-57; 10g
+# 30-35, 45-50; 10h 28-31, 32-41; 10i 26-29, 37-40.
+SCENARIO_GROUPS=("1a" "1b" "1c" "2 7 8" "3 4" "5a" "5b" "5c" "5d" "5e" "6m" "6s" "9 11" "12"
+    "10a" "10b" "10c" "10d" "10e" "10f" "10g" "10h" "10i")
 # The scenarios this run runs, as " N N ... ", in ALL_SCENARIOS order; empty
 # for a run of all the groups. An argument is a scenario id, or the number of a
 # scenario that runs as shards, which selects every shard of it.
@@ -574,6 +575,7 @@ start_firefox_windowed() {
     local page=${1:-blank-page.html} title=${2:-e2e blank page} deadline
     shift $(($# < 2 ? $# : 2))
     docker rm -f -v "$PROBE_CONTAINER" "$CONTAINER" >/dev/null 2>&1 || true
+    firefox_started
     docker run -d --rm --name "$CONTAINER" --network none "${NO_DNS_ARGS[@]}" \
         --shm-size 1g \
         "${FIREFOX_ARGS[@]}" "$@" \
@@ -716,13 +718,34 @@ shown_title() {
     printf '%s\n' "$name"
 }
 
+# single-window-page.html's titles are unique to each load ("sw:NAME TOKEN",
+# see tab_prefix). After Quit & Restart with private browsing off, session
+# restore shows each tab it brings back with the title it was saved with, the
+# one from before the quit, until the tab is first shown and its page has
+# loaded again with a new token: a title read in between is not the page's,
+# and the next read of the same tab differs from it (once, a tab walk took
+# tab 1's old title and then failed on its new one). So wait_title keeps each
+# such title it returns in SEEN_TITLES, each start of Firefox copies them to
+# EARLIER_TITLES (firefox_started), and wait_title takes none of those: no
+# page this Firefox loaded can have one. Files, as checks run in $(...)
+# subshells. docs/agents_output/debugging/e2e-off-ctrl-q.md
+SEEN_TITLES=$WORK/titles-seen
+EARLIER_TITLES=$WORK/titles-earlier
+firefox_started() {
+    [[ ! -f "$SEEN_TITLES" ]] || cp "$SEEN_TITLES" "$EARLIER_TITLES"
+}
+
 # Waits up to 15 s until the title of the page Firefox shows starts with
-# PREFIX (is "" when PREFIX is ""), and prints that title.
+# PREFIX (is "" when PREFIX is "") and is not one an earlier Firefox showed
+# (EARLIER_TITLES), and prints that title.
 wait_title() {
-    local prefix=$1 deadline=$((SECONDS + 15)) title
+    local prefix=$1 deadline=$((SECONDS + 15)) title earlier=""
+    [[ ! -f "$EARLIER_TITLES" ]] || earlier=$'\n'$(<"$EARLIER_TITLES")$'\n'
     while ((SECONDS < deadline)); do
         if title=$(shown_title) &&
-            { [[ -z "$prefix" && -z "$title" ]] || [[ -n "$prefix" && "$title" == "$prefix"* ]]; }; then
+            { [[ -z "$prefix" && -z "$title" ]] || [[ -n "$prefix" && "$title" == "$prefix"* ]]; } &&
+            [[ "$earlier" != *$'\n'"$title"$'\n'* ]]; then
+            [[ "$title" != sw:* ]] || printf '%s\n' "$title" >>"$SEEN_TITLES"
             printf '%s\n' "$title"
             return 0
         fi
@@ -759,7 +782,8 @@ now_ms() {
 # anything an action that must change nothing would show (another window, or
 # its tab moved in). How long a change of the same kind takes when it must
 # come is measured as the run goes: "tab", a tab shown after the key that
-# switches to it (check_tabs); "window", what an action shows (check_windows'
+# switches to it (check_tabs, measured inside the container, to 10 ms);
+# "window", what an action shows (check_windows'
 # SHOWS, a new private window listed, open_then_load's new tab) after the
 # action. record_latency KIND MS keeps the longest of each in a file in WORK,
 # so that checks run in a subshell ($(...)) count too.
@@ -823,18 +847,6 @@ latency_note() {
     fi
 }
 
-# switch_tab KEY PREFIX: presses KEY, which shows another tab, and waits until
-# the page shown has a title that starts with PREFIX (wait_title); prints that
-# title. The time from the key to the title is a "tab" latency.
-switch_tab() {
-    local started title
-    started=$(now_ms)
-    in_x xdotool key "$1" || return 1
-    title=$(wait_title "$2") || return 1
-    record_latency tab "$(($(now_ms) - started))"
-    printf '%s\n' "$title"
-}
-
 # Drags with the left button from (X,Y) to (X2,Y2) in 20 steps, as a person
 # would (the pauses pace the gesture). Returns non-zero if any step fails.
 drag() {
@@ -867,44 +879,41 @@ browser_windows() {
 # Checks that Firefox's window has exactly the tabs NAMES (distinct page names,
 # see tab_prefix), in order, and ends with the last one shown. Alt+K shows tab
 # K, Alt+9 the last tab, and Ctrl+PageDown from the last tab wraps to the
-# first. Every step waits for the title to change to the expected page, so a
+# first. Every step waits up to 15 s for the title to change to the expected
+# page (as wait_title, also taking no title an earlier Firefox showed), so a
 # key Firefox has not handled yet can't pass for one it has. With one tab
 # nothing can change, so Ctrl+PageDown gets absence_wait's "tab" time to show
 # a second tab. Prints what differs and returns 1 on a mismatch.
+# The walk runs inside the container, in one docker exec (tab_walk.sh): a
+# docker exec for each key and each read made the walk about half of a
+# check's docker execs (docs/agents_output/analysis/test-speed-60s-round2.md).
+# Each step's time from its key to its title is a "tab" latency; the titles it
+# takes go to SEEN_TITLES, as wait_title's do.
 check_tabs() {
-    local names=() titles=() n k title
+    local names=() absence=0 earlier="" out status=0 line longest=0 message="" failed=""
     read -r -a names <<<"$1"
-    n=${#names[@]}
-    if ((n == 1)); then
-        if ! title=$(wait_title "$(tab_prefix "${names[0]}")"); then
-            echo "the window shows '$(shown_title)', not ${names[0]}"
-            return 1
-        fi
-        in_x xdotool key ctrl+Next sleep "$(absence_wait tab)" || return 1
-        if [[ "$(shown_title)" != "$title" ]]; then
-            echo "a second tab exists: '$(shown_title)'"
-            return 1
-        fi
-        return 0
+    ((${#names[@]} != 1)) || absence=$(absence_wait tab)
+    [[ ! -f "$EARLIER_TITLES" ]] || earlier=$(<"$EARLIER_TITLES")
+    out=$(docker exec -u 1000 -e DISPLAY=:0 -e "EARLIER_TITLE_LIST=$earlier" "$CONTAINER" \
+        sh /e2e/tab_walk.sh "$WINDOW" "$absence" "${names[@]}") || status=$?
+    while IFS= read -r line; do
+        case $line in
+            "latency "*) ((${line#latency } <= longest)) || longest=${line#latency } ;;
+            "title sw:"*) printf '%s\n' "${line#title }" >>"$SEEN_TITLES" ;;
+            "fail "*)
+                failed=yes
+                message=${line#fail }
+                ;;
+        esac
+    done <<<"$out"
+    ((longest == 0)) || record_latency tab "$longest"
+    ((status != 0)) || return 0
+    if [[ -n "$failed" ]]; then
+        [[ -z "$message" ]] || printf '%s\n' "$message"
+    else
+        echo "the tab walk did not run (docker exec exited $status)"
     fi
-    # Start from the last tab, so Alt+1 must change the page shown.
-    if ! switch_tab alt+9 "$(tab_prefix "${names[n - 1]}")" >/dev/null; then
-        echo "the last tab is '$(shown_title)', not ${names[n - 1]}"
-        return 1
-    fi
-    for ((k = 1; k <= n; k++)); do
-        if ! title=$(switch_tab "alt+$k" "$(tab_prefix "${names[k - 1]}")"); then
-            echo "tab $k is '$(shown_title)', not ${names[k - 1]}"
-            return 1
-        fi
-        titles+=("$title")
-    done
-    # Tab N must be the last tab: the next one is the first again.
-    if ! switch_tab ctrl+Next "${titles[0]}" >/dev/null; then
-        echo "after tab $n comes '$(shown_title)', not tab 1"
-        return 1
-    fi
-    switch_tab "alt+$n" "${titles[n - 1]}" >/dev/null
+    return 1
 }
 
 # The private window, once one is open (scenario 10), or "".
@@ -1268,6 +1277,7 @@ check_restarted() {
             fi
             sleep 0.2
         done
+        firefox_started
         if [[ -z "$new_pid" || "$new_pid" == "$old_pid" ]]; then
             problem="Firefox (pid $old_pid) is not a new process: '$new_pid'"
         elif [[ "$(docker inspect -f '{{.State.Running}} {{.State.StartedAt}}' "$CONTAINER" 2>/dev/null)" != "true $started" ]]; then
@@ -2330,14 +2340,11 @@ scenario_10e() {
     check_kept off-cookie-quit-restart "e2e cookie page cookies=e2e-main" "$title"
 }
 
-# Closing the last window restarts Firefox; a .torrent link still downloads;
-# `docker stop` quits Firefox cleanly.
+# Closing the last window restarts Firefox.
 scenario_10f() {
-    echo "== scenario 10f: private browsing off: closing the last window, the download, the clean stop"
+    echo "== scenario 10f: private browsing off: closing the last window"
     FIREFOX_ARGS=("${OFF_ARGS[@]}")
-    mkdir -p "$WORK/downloads-off"
-    chmod 0777 "$WORK/downloads-off"
-    start_firefox_windowed blank-page.html "e2e blank page" -v "$WORK/downloads-off:/config/downloads"
+    start_firefox_windowed blank-page.html "e2e blank page"
     # Tabs that must not come back when Firefox starts again after its last
     # window closed (before, the window had the tabs Quit & Restart reopened).
     setup_load off-main-page "$WINDOW" file:///e2e/single-window-page.html "sw:main " || return 0
@@ -2361,6 +2368,18 @@ scenario_10f() {
         failures=$((failures + 1))
     fi
     check_restarted off-close-last-private normal e2e-blank close_window "$PWINDOW" key ctrl+shift+w
+}
+
+# A .torrent link still downloads; `docker stop` quits Firefox cleanly. The
+# checks start from what 10f's last check leaves: a normal window with only
+# FF_OPEN_URL's page (blank-page.html), no private window; here it is the
+# first Firefox of a fresh container, not one the image started again.
+scenario_10i() {
+    echo "== scenario 10i: private browsing off: the download, the clean stop"
+    FIREFOX_ARGS=("${OFF_ARGS[@]}")
+    mkdir -p "$WORK/downloads-off"
+    chmod 0777 "$WORK/downloads-off"
+    start_firefox_windowed blank-page.html "e2e blank page" -v "$WORK/downloads-off:/config/downloads"
     setup_load off-download-page "$WINDOW" file:///e2e/download-page.html "e2e download page" ||
         return 0
     make_test_torrent

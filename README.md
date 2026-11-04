@@ -488,7 +488,7 @@ tests/e2e/run.sh       # Firefox in throwaway containers: cursors, single window
                        # on and off (and switching), downloads, WebRTC, sound to the web UI's
                        # audio stream, no telemetry with the service's policies; its
                        # scenarios run in groups at the same time (the long ones,
-                       # 1, 5, 6 and 10, as shards: 1a-1c, 5a-5e, 6m 6s, 10a-10h,
+                       # 1, 5, 6 and 10, as shards: 1a-1c, 5a-5e, 6m 6s, 10a-10i,
                        # each in containers of its own), and `tests/e2e/run.sh 7 8`
                        # runs only scenarios 7 and 8 (`... 5` all of 5's shards,
                        # `... 10c` one)
