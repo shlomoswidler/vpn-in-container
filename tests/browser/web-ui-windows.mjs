@@ -9,16 +9,20 @@
 // What this cannot show: whether the computer running the browser lets Ctrl+` through. On a
 // Mac, macOS's own window switching is Command+`, and Control+` has no system shortcut.
 //
+// The browser starts at once, while the container boots; the checks start once run.sh writes
+// the web UI's URL to READY (browser.mjs's webUiUrl). If it writes "stop" instead, this prints
+// nothing.
+//
 // Prints {"total", "failed", "failures", "cases"}, or {"error"} if the run could not finish.
-// Usage: node web-ui-windows.mjs chrome|firefox BINARY PROFILE_DIR PORT URL CONTAINER
+// Usage: node web-ui-windows.mjs chrome|firefox BINARY PROFILE_DIR PORT READY CONTAINER
 
 import { execFile } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 
-import { launch, waitFor } from './browser.mjs';
+import { launch, waitFor, webUiUrl } from './browser.mjs';
 
-const [kind, binary, profile, port, url, container] = process.argv.slice(2);
+const [kind, binary, profile, port, readyFile, container] = process.argv.slice(2);
 const run = promisify(execFile);
 const cases = [];
 
@@ -55,7 +59,12 @@ async function windowsUntil(test, timeoutMs) {
     }
 }
 
+// The checks, once run.sh has handed over the web UI's URL; resolves to false if it said stop.
 async function main(session) {
+    const url = await webUiUrl(readyFile);
+    if (url === null) {
+        return false;
+    }
     await session.navigate(url);
     await waitFor(session, 'document.documentElement.classList.contains("noVNC_connected")',
         'the web UI connecting to the VNC server', 60000);
@@ -86,14 +95,16 @@ async function main(session) {
     const back = state.ids.length === 2 && state.active === privateWindow &&
         state.top === privateWindow;
     record('Ctrl+` again shows the private window', back, { normal, privateWindow, ...state });
+    return true;
 }
 
 let session;
 try {
     session = await launch(kind, binary, profile, port);
-    await main(session);
-    const failures = cases.filter(c => !c.ok).map(c => c.name);
-    process.stdout.write(`${JSON.stringify({ total: cases.length, failed: failures.length, failures, cases })}\n`);
+    if (await main(session)) {
+        const failures = cases.filter(c => !c.ok).map(c => c.name);
+        process.stdout.write(`${JSON.stringify({ total: cases.length, failed: failures.length, failures, cases })}\n`);
+    }
 } catch (err) {
     process.stdout.write(`${JSON.stringify({ error: err.message, cases })}\n`);
     process.exitCode = 1;

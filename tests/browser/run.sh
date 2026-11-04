@@ -42,7 +42,8 @@
 # local harnesses, the two audio parts and the windows check, in each browser,
 # each with its own container (web-ui-PID-KIND-PART), tunnel, port and
 # profiles. The containers start first, and the local harnesses run while they
-# boot. The results print in order once all are done.
+# boot; so do the web UI checks' own browsers, which start at once and wait for
+# the web UI's URL (web_ui_ready). The results print in order once all are done.
 #
 # First, in each browser, a probe (audio-clock-probe.html) checks that the
 # browser's real audio output keeps pace with real time: when macOS's audio
@@ -61,7 +62,10 @@
 # Firefox runs from a copy of /Applications/Firefox.app in the run's temporary
 # directory (firefox-copy.sh), never from the app itself: a Firefox started
 # from the app would process the update the user's Firefox may have staged
-# there (and ask the user for an administrator's password to apply it).
+# there (and ask the user for an administrator's password to apply it). The
+# copy's first run takes seconds (firefox_first_run), so it runs first; then the
+# Firefox probe starts, the web UI checks' Firefox instances 1, 2 and 3 s later,
+# and the local harnesses' once the probe has ended.
 #
 # Usage: tests/browser/run.sh   (needs docker, python3, node, and Google
 #        Chrome and/or Firefox in /Applications)
@@ -106,10 +110,10 @@ TIMER_PID=""
 # and 0.853-0.858 with Firefox's mock audio backend, at which the audio
 # harness's tone checks failed every time.
 AUDIO_CLOCK_MIN=0.95
-# How long the local harnesses wait before starting their browsers: 0 alone;
-# tests/run-all.sh sets it (10 s), to keep them out of the e2e suite's container
-# starts (see there). Not the audio probes: the web UI audio checks wait for
-# their verdict, and inside run-all their containers were ready as early as
+# How long the local harnesses wait before starting their browsers: 0 by
+# default; BROWSER_HOST_DELAY_S sets it (10 s was measured, to keep them out of
+# the e2e suite's container starts; tests/run-all.sh does not set it). Not the
+# audio probes: the web UI audio checks wait for their verdict, and inside run-all their containers were ready as early as
 # 10-11 s, while a Firefox probe started 10 s late ended at 22-23 s (measured).
 HOST_DELAY_S=${BROWSER_HOST_DELAY_S:-0}
 
@@ -217,25 +221,6 @@ print("\n".join(str(s.getsockname()[1]) for s in sockets))
 ' "$1"
 }
 
-# The browsers found, and a port for each job's browser (8 per browser) and the server.
-kinds=()
-binaries=()
-for kind in chrome firefox; do
-    if [[ "$kind" == chrome ]]; then
-        binary=$CHROME
-    else
-        [[ -x "$FIREFOX_APP/Contents/MacOS/firefox" ]] || continue
-        FIREFOX=$(firefox_copy "$FIREFOX_APP" "$WORK")
-        binary=$FIREFOX
-    fi
-    [[ -x "$binary" ]] || continue
-    kinds+=("$kind")
-    binaries+=("$binary")
-done
-PORTS=()
-while IFS= read -r port; do
-    PORTS+=("$port")
-done < <(free_ports $((1 + 8 * ${#kinds[@]})))
 mkdir -p "$WORK/profiles" "$WORK/results" "$WORK/logs" "$WORK/probe" "$WORK/site"
 
 # start_job NAME FUNCTION ARGS...: runs FUNCTION ARGS... in the background, in a
@@ -249,6 +234,52 @@ start_job() {
     set +m
     JOB_NAMES+=("$name")
 }
+
+# wait_file FILE: waits until FILE exists. (The overall time limit ends the wait
+# if it never does.)
+wait_file() {
+    while [[ ! -e "$1" ]]; do
+        sleep 0.1
+    done
+}
+
+# The file in which firefox_first_run leaves the test Firefox's version.
+FIREFOX_VERSION_FILE="$WORK/firefox-version"
+
+# firefox_first_run BINARY: the first run of firefox_copy's copy, `firefox
+# --version`, its output in FIREFOX_VERSION_FILE (written whole, even if it
+# fails). A new copy's first run takes seconds while macOS checks the new app
+# (syspolicyd and XprotectService busy; measured: --version 5.1-5.2 s alone, a
+# second one 0.16 s; a first launch 10.0 s inside tests/run-all.sh), and every
+# Firefox started meanwhile waits for it, then starts at the same moment as the
+# others. Run as a job; the Firefox jobs wait for it.
+firefox_first_run() {
+    local status=0
+    "$1" --version >"$FIREFOX_VERSION_FILE.tmp" || status=$?
+    mv "$FIREFOX_VERSION_FILE.tmp" "$FIREFOX_VERSION_FILE"
+    return "$status"
+}
+
+# The browsers found, and a port for each job's browser (8 per browser) and the server.
+kinds=()
+binaries=()
+for kind in chrome firefox; do
+    if [[ "$kind" == chrome ]]; then
+        binary=$CHROME
+    else
+        [[ -x "$FIREFOX_APP/Contents/MacOS/firefox" ]] || continue
+        FIREFOX=$(firefox_copy "$FIREFOX_APP" "$WORK")
+        binary=$FIREFOX
+        start_job firefox-first-run firefox_first_run "$FIREFOX"
+    fi
+    [[ -x "$binary" ]] || continue
+    kinds+=("$kind")
+    binaries+=("$binary")
+done
+PORTS=()
+while IFS= read -r port; do
+    PORTS+=("$port")
+done < <(free_ports $((1 + 8 * ${#kinds[@]})))
 
 in_x() { docker exec -u 1000 -e DISPLAY=:0 "$WEB_CONTAINER" "$@"; }
 
@@ -317,18 +348,48 @@ banner_check() {
     printf '%s\n' "$result" >"$WORK/results/$1-banner"
 }
 
-# web_ui_job KIND BINARY PORT PART [PORT_A PORT_B]: one web UI check in
+# web_ui_ready FILE WHAT: tells a web UI check's script, which waits for FILE
+# (browser.mjs's webUiUrl), to go on at the URL WHAT, or with WHAT stop, to end
+# (written whole).
+web_ui_ready() {
+    printf '%s\n' "$2" >"$1.tmp"
+    mv "$1.tmp" "$1"
+}
+
+# web_ui_job KIND BINARY PORT PART PORT_A PORT_B DELAY: one web UI check in
 # browser KIND, with the DevTools or WebDriver BiDi port PORT, in a container of
 # its own: PART reconnect or muted is that part of web-ui-audio.mjs, windows is
 # web-ui-windows.mjs and, at the same time, web-ui-banner.mjs (its two browsers on
-# PORT_A and PORT_B). Its result in $WORK/results/KIND-PART (and KIND-banner).
-# Run as a job.
+# PORT_A and PORT_B; - for the other parts). The check's browser starts while
+# the container boots (Firefox's DELAY seconds after the copy's first run, so
+# that the Firefox instances do not start at the same moment; the container
+# starts at once), and the check
+# starts once the web UI is up (and, for the audio parts, the probe found the
+# audio output fast enough). Its result in $WORK/results/KIND-PART (and
+# KIND-banner). Run as a job.
 web_ui_job() {
-    local kind=$1 binary=$2 port=$3 part=$4 result timings banner_pid
+    local kind=$1 binary=$2 port=$3 part=$4 timings banner_pid node_pid
     local out="$WORK/results/$kind-$part" start="$WORK/start-$kind-$part.out"
+    local ready="$WORK/ready-$kind-$part"
     timings=$(timings_file "$kind")
     WEB_CONTAINER="web-ui-$$-$kind-$part"
     trap stop_web_ui EXIT
+    # The check's browser, while the container starts.
+    (
+        if [[ "$kind" == firefox ]]; then
+            wait_file "$FIREFOX_VERSION_FILE"
+            sleep "$7"
+        fi
+        if [[ "$part" == windows ]]; then
+            exec node "$BROWSER_DIR/web-ui-windows.mjs" "$kind" "$binary" \
+                "$WORK/profiles/$kind-windows" "$port" "$ready" "$WEB_CONTAINER"
+        else
+            exec node "$BROWSER_DIR/web-ui-audio.mjs" "$kind" "$binary" \
+                "$WORK/profiles/$kind-$part" "$port" "$ready" "$WEB_CONTAINER" "$part" \
+                "$timings"
+        fi
+    ) >"$out" &
+    node_pid=$!
     # Not in $(...): the tunnel and WEB_UI_URL must outlive the call.
     if [[ "$part" == windows ]]; then
         start_web_ui blank-page.html "e2e blank page" "${OFF_ARGS[@]}" >"$start" || true
@@ -336,24 +397,25 @@ web_ui_job() {
         start_web_ui audio-page.html "e2e audio page" "${SERVICE_ARGS[@]}" >"$start" || true
     fi
     if [[ -z "${WEB_UI_URL:-}" ]]; then
+        web_ui_ready "$ready" stop
+        wait "$node_pid" || true
         cp "$start" "$out"
         [[ "$part" != windows ]] || cp "$start" "$WORK/results/$kind-banner"
     elif [[ "$part" != windows ]] && ! audio_ok "$kind"; then
+        web_ui_ready "$ready" stop
+        wait "$node_pid" || true
         echo "$SKIPPED" >"$out"
     elif [[ "$part" == windows ]]; then
         # The warning's checks at the same time (they only click the side panel).
         banner_check "$kind" "$binary" "$5" "$6" &
         banner_pid=$!
-        result=$(node "$BROWSER_DIR/web-ui-windows.mjs" "$kind" "$binary" \
-            "$WORK/profiles/$kind-windows" "$port" "$WEB_UI_URL" "$WEB_CONTAINER") || true
-        printf '%s\n' "$result" >"$out"
-        # Not a bare wait: the tunnel runs in the background too.
+        web_ui_ready "$ready" "$WEB_UI_URL"
+        # Not bare waits: the tunnel runs in the background too.
+        wait "$node_pid" || true
         wait "$banner_pid" || true
     else
-        result=$(node "$BROWSER_DIR/web-ui-audio.mjs" "$kind" "$binary" \
-            "$WORK/profiles/$kind-$part" "$port" "$WEB_UI_URL" "$WEB_CONTAINER" "$part" \
-            "$timings") || true
-        printf '%s\n' "$result" >"$out"
+        web_ui_ready "$ready" "$WEB_UI_URL"
+        wait "$node_pid" || true
     fi
     # The muted part waits for these: if the reconnect part ended without them, say so.
     if [[ "$part" == reconnect && ! -e "$timings" ]]; then
@@ -369,6 +431,8 @@ web_ui_job() {
 local_harnesses() {
     local kind=$1 binary=$2 result
     sleep "$HOST_DELAY_S"
+    # Firefox's start after its probe, the first Firefox to start (audio_probe).
+    [[ "$kind" != firefox ]] || wait_file "$WORK/probe/$kind"
     if [[ "$kind" == chrome ]]; then
         # The proxy is browser.mjs's CLOSED_PROXY: Chrome reaches only loopback;
         # and, as browser.mjs's chromeArgs, no background requests or updater.
@@ -435,9 +499,11 @@ else:
 
 # audio_probe KIND BINARY PORT: the audio probe in browser KIND (its DevTools or
 # WebDriver BiDi port PORT); its verdict (probe_verdict) in $WORK/probe/KIND,
-# written whole. Run as a job.
+# written whole. Firefox's starts once the copy's first run has ended
+# (firefox_first_run): the web UI audio checks wait for its verdict. Run as a job.
 audio_probe() {
     local kind=$1 result
+    [[ "$kind" != firefox ]] || wait_file "$FIREFOX_VERSION_FILE"
     result=$(node "$BROWSER_DIR/page-result.mjs" "$kind" "$2" "$WORK/profiles/$kind-probe" \
         "$3" "$PROBE_URL" "$PROBE_CLICK_TITLE") || true
     probe_verdict "$result" >"$WORK/probe/$kind.tmp" ||
@@ -484,10 +550,11 @@ for i in ${kinds[@]+"${!kinds[@]}"}; do
         WEB_CONTAINERS+=("web-ui-$$-$kind-$part")
     done
     start_job "$kind-reconnect" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((1 + 8 * i))]}" \
-        reconnect
-    start_job "$kind-muted" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((2 + 8 * i))]}" muted
+        reconnect - - 1
+    start_job "$kind-muted" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((2 + 8 * i))]}" muted \
+        - - 2
     start_job "$kind-windows" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((3 + 8 * i))]}" \
-        windows "${PORTS[$((7 + 8 * i))]}" "${PORTS[$((8 + 8 * i))]}"
+        windows "${PORTS[$((7 + 8 * i))]}" "${PORTS[$((8 + 8 * i))]}" 3
 done
 
 mkdir -p "$WORK/site/core/util"
@@ -603,7 +670,8 @@ for i in ${kinds[@]+"${!kinds[@]}"}; do
     if [[ "${kinds[$i]}" == chrome ]]; then
         versions+=("$("${binaries[$i]}" --version | sed 's/ *$//')")
     else
-        versions+=("$("${binaries[$i]}" --version)")
+        wait_file "$FIREFOX_VERSION_FILE"
+        versions+=("$(cat "$FIREFOX_VERSION_FILE")")
     fi
 done
 
@@ -664,7 +732,7 @@ for i in ${kinds[@]+"${!kinds[@]}"}; do
     report "$version windows" "$(result "$kind-windows")" "$WINDOWS_CASES"
     report "$version web UI sound-start warning" "$(result "$kind-banner")" "$BANNER_CASES"
     # What the jobs printed besides their results (errors from the tools they ran).
-    for job in probe harnesses reconnect muted windows; do
+    for job in first-run probe harnesses reconnect muted windows; do
         if [[ -s "$WORK/logs/$kind-$job" ]]; then
             echo "      $kind-$job output:"
             sed 's/^/      /' "$WORK/logs/$kind-$job"
