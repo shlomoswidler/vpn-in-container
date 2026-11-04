@@ -31,7 +31,11 @@
 # whatever .env sets) and showing tests/e2e/blank-page.html, so it can have a
 # normal and a private window; web-ui-windows.mjs opens a private window in it
 # and checks that Ctrl+` typed in the web UI shows the other window (see that
-# file).
+# file). At the same time, in the same container, web-ui-banner.mjs checks the
+# web UI's warning that sound did not start (config/novnc/ui.js): with resume()
+# stubbed never to settle (or to settle late), in two browsers of its own, the
+# warning shows within its wait, does not show when sound is off or muted, and
+# goes away when sound starts late (see that file).
 #
 # Every check runs at the same time as the others, as a job of its own (each in
 # a process group of its own, so that cleanup can stop what it started): the
@@ -93,6 +97,12 @@ TIMER_PID=""
 # and 0.853-0.858 with Firefox's mock audio backend, at which the audio
 # harness's tone checks failed every time.
 AUDIO_CLOCK_MIN=0.95
+# How long the local harnesses wait before starting their browsers: 0 alone;
+# tests/run-all.sh sets it (10 s), to keep them out of the e2e suite's container
+# starts (see there). Not the audio probes: the web UI audio checks wait for
+# their verdict, and inside run-all their containers were ready as early as
+# 10-11 s, while a Firefox probe started 10 s late ended at 22-23 s (measured).
+HOST_DELAY_S=${BROWSER_HOST_DELAY_S:-0}
 
 stop_web_ui() {
     [[ -n "$TUNNEL_PID" ]] && kill "$TUNNEL_PID" 2>/dev/null || true
@@ -197,7 +207,7 @@ print("\n".join(str(s.getsockname()[1]) for s in sockets))
 ' "$1"
 }
 
-# The browsers found, and a port for each job's browser (6 per browser) and the server.
+# The browsers found, and a port for each job's browser (8 per browser) and the server.
 kinds=()
 binaries=()
 for kind in chrome firefox; do
@@ -209,7 +219,7 @@ done
 PORTS=()
 while IFS= read -r port; do
     PORTS+=("$port")
-done < <(free_ports $((1 + 6 * ${#kinds[@]})))
+done < <(free_ports $((1 + 8 * ${#kinds[@]})))
 mkdir -p "$WORK/profiles" "$WORK/results" "$WORK/logs" "$WORK/probe" "$WORK/site"
 
 # start_job NAME FUNCTION ARGS...: runs FUNCTION ARGS... in the background, in a
@@ -276,12 +286,29 @@ start_web_ui() {
 # measured times for the muted part.
 timings_file() { echo "$WORK/$1-timings.json"; }
 
-# web_ui_job KIND BINARY PORT PART: one web UI check in browser KIND, with the
-# DevTools or WebDriver BiDi port PORT, in a container of its own: PART reconnect
-# or muted is that part of web-ui-audio.mjs, windows is web-ui-windows.mjs. Its
-# result in $WORK/results/KIND-PART. Run as a job.
+# banner_check KIND BINARY PORT_A PORT_B: web-ui-banner.mjs in browser KIND on the
+# web UI at WEB_UI_URL (its two browsers on the two ports), unless the
+# audio probe found the audio output too slow; its result in
+# $WORK/results/KIND-banner.
+banner_check() {
+    local result
+    if audio_ok "$1"; then
+        result=$(node "$BROWSER_DIR/web-ui-banner.mjs" "$1" "$2" "$WORK/profiles/$1-banner" \
+            "$3" "$4" "$WEB_UI_URL") || true
+    else
+        result=$SKIPPED
+    fi
+    printf '%s\n' "$result" >"$WORK/results/$1-banner"
+}
+
+# web_ui_job KIND BINARY PORT PART [PORT_A PORT_B]: one web UI check in
+# browser KIND, with the DevTools or WebDriver BiDi port PORT, in a container of
+# its own: PART reconnect or muted is that part of web-ui-audio.mjs, windows is
+# web-ui-windows.mjs and, at the same time, web-ui-banner.mjs (its two browsers on
+# PORT_A and PORT_B). Its result in $WORK/results/KIND-PART (and KIND-banner).
+# Run as a job.
 web_ui_job() {
-    local kind=$1 binary=$2 port=$3 part=$4 result timings
+    local kind=$1 binary=$2 port=$3 part=$4 result timings banner_pid
     local out="$WORK/results/$kind-$part" start="$WORK/start-$kind-$part.out"
     timings=$(timings_file "$kind")
     WEB_CONTAINER="web-ui-$$-$kind-$part"
@@ -294,12 +321,18 @@ web_ui_job() {
     fi
     if [[ -z "${WEB_UI_URL:-}" ]]; then
         cp "$start" "$out"
+        [[ "$part" != windows ]] || cp "$start" "$WORK/results/$kind-banner"
     elif [[ "$part" != windows ]] && ! audio_ok "$kind"; then
         echo "$SKIPPED" >"$out"
     elif [[ "$part" == windows ]]; then
+        # The warning's checks at the same time (they only click the side panel).
+        banner_check "$kind" "$binary" "$5" "$6" &
+        banner_pid=$!
         result=$(node "$BROWSER_DIR/web-ui-windows.mjs" "$kind" "$binary" \
             "$WORK/profiles/$kind-windows" "$port" "$WEB_UI_URL" "$WEB_CONTAINER") || true
         printf '%s\n' "$result" >"$out"
+        # Not a bare wait: the tunnel runs in the background too.
+        wait "$banner_pid" || true
     else
         result=$(node "$BROWSER_DIR/web-ui-audio.mjs" "$kind" "$binary" \
             "$WORK/profiles/$kind-$part" "$port" "$WEB_UI_URL" "$WEB_CONTAINER" "$part" \
@@ -319,6 +352,7 @@ web_ui_job() {
 # their results in $WORK/results/KIND-cursor and KIND-audio. Run as a job.
 local_harnesses() {
     local kind=$1 binary=$2 result
+    sleep "$HOST_DELAY_S"
     if [[ "$kind" == chrome ]]; then
         # The proxy is browser.mjs's CLOSED_PROXY: Chrome reaches only loopback;
         # and, as browser.mjs's chromeArgs, no background requests or updater.
@@ -422,7 +456,7 @@ done
 for i in ${kinds[@]+"${!kinds[@]}"}; do
     kind=${kinds[$i]}
     mkdir -p "$WORK/profiles/$kind-probe"
-    start_job "$kind-probe" audio_probe "$kind" "${binaries[$i]}" "${PORTS[$((6 + 6 * i))]}"
+    start_job "$kind-probe" audio_probe "$kind" "${binaries[$i]}" "${PORTS[$((6 + 8 * i))]}"
 done
 
 # The web UI containers first: they take the longest to come up.
@@ -433,11 +467,11 @@ for i in ${kinds[@]+"${!kinds[@]}"}; do
     for part in reconnect muted windows; do
         WEB_CONTAINERS+=("web-ui-$$-$kind-$part")
     done
-    start_job "$kind-reconnect" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((1 + 6 * i))]}" \
+    start_job "$kind-reconnect" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((1 + 8 * i))]}" \
         reconnect
-    start_job "$kind-muted" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((2 + 6 * i))]}" muted
-    start_job "$kind-windows" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((3 + 6 * i))]}" \
-        windows
+    start_job "$kind-muted" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((2 + 8 * i))]}" muted
+    start_job "$kind-windows" web_ui_job "$kind" "${binaries[$i]}" "${PORTS[$((3 + 8 * i))]}" \
+        windows "${PORTS[$((7 + 8 * i))]}" "${PORTS[$((8 + 8 * i))]}"
 done
 
 mkdir -p "$WORK/site/core/util"
@@ -545,7 +579,7 @@ for i in ${kinds[@]+"${!kinds[@]}"}; do
     kind=${kinds[$i]}
     mkdir -p "$WORK/profiles/$kind" "$WORK/profiles/$kind-audio"
     start_job "$kind-harnesses" local_harnesses "$kind" "${binaries[$i]}" \
-        "${PORTS[$((4 + 6 * i))]}" "${PORTS[$((5 + 6 * i))]}"
+        "${PORTS[$((4 + 8 * i))]}" "${PORTS[$((5 + 8 * i))]}"
 done
 
 versions=()
@@ -557,9 +591,11 @@ for i in ${kinds[@]+"${!kinds[@]}"}; do
     fi
 done
 
-# web-ui-audio.mjs's cases (its two parts together) and web-ui-windows.mjs's.
-WEB_UI_CASES=19
+# web-ui-audio.mjs's cases (its two parts together), web-ui-windows.mjs's and
+# web-ui-banner.mjs's.
+WEB_UI_CASES=22
 WINDOWS_CASES=3
+BANNER_CASES=5
 
 # report LABEL RESULT COUNT: prints ok or FAIL for a harness RESULT of COUNT cases.
 report() {
@@ -610,6 +646,7 @@ for i in ${kinds[@]+"${!kinds[@]}"}; do
         "$(merged_result "$(result "$kind-reconnect")" "$(result "$kind-muted")")" \
         "$WEB_UI_CASES"
     report "$version windows" "$(result "$kind-windows")" "$WINDOWS_CASES"
+    report "$version web UI sound-start warning" "$(result "$kind-banner")" "$BANNER_CASES"
     # What the jobs printed besides their results (errors from the tools they ran).
     for job in probe harnesses reconnect muted windows; do
         if [[ -s "$WORK/logs/$kind-$job" ]]; then

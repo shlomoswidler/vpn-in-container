@@ -103,7 +103,11 @@ image changed in that file. For each, three files in the overlay's directory
   interaction is handled, a reconnect calls `UI.updateAudioVolume()`, which
   turns audio back on unless the volume slider is at 0 (muted).
   `disconnectFinished()` turns audio off but leaves the slider and the saved
-  `audio_enabled` setting as they were. Neither of those removes anything.
+  `audio_enabled` setting as they were. It also adds `checkAudioStarted()`,
+  called where `updateAudio()` turns sound on: if the AudioContext is still not
+  running 5 seconds later, a status message asks the user to reload the page
+  (and goes away if sound starts after all); turning sound off cancels it.
+  None of these removes anything.
   `kill.patch` changes only the key the script presses after Escape, and the
   comment that names it: the image's script presses Ctrl+Q, which asks for
   confirmation here (`config/firefox-autoconfig/single-window.cfg`), so on

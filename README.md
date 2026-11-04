@@ -257,6 +257,9 @@ Sound from Firefox in the container plays in the browser tab that shows the web 
    stays off if you had muted it. The image's web UI leaves it off until you click the
    speaker icon again; `config/novnc/ui.js` (the image's `app/ui.js` plus `ui.js.patch`,
    mounted over it) fixes that.
+   If sound is on but your browser has not started it 5 seconds later (Firefox sometimes
+   never does until the page is reloaded), the web UI shows "Sound did not start. Reload the
+   page, then click in it." and takes the message back if sound starts after all.
 4. **Sites in the container:** Firefox there keeps its default autoplay setting (block
    audible autoplay): a site plays sound once you click in it, on a play button for
    example. Your clicks reach Firefox as real input, so nothing else is needed.
@@ -286,7 +289,9 @@ What is tested automatically (see [Automated Tests](#automated-tests)), and what
   audio output: no sound before a gesture, the speaker icon on first use, the first click
   on a later visit, and the tone from the container's page; then, with no click, sound
   coming back after the container restarts and the same tab reconnects, and staying off
-  after such a restart if it was muted.
+  after such a restart if it was muted; and the "Sound did not start" warning, which must
+  not show when sound works or is off, and must show (and go away again) when sound is made
+  not to start, or to start late.
 - **Manual: actually hearing it.** The last step, from the browser to your Mac's speakers
   (the output device, the system volume, the tab not muted), and Safari, are not tested.
   Check once after setting up or upgrading: open http://localhost:5800, open the side panel,

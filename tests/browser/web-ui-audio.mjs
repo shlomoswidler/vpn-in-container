@@ -21,6 +21,11 @@
 // after the speaker icon mutes audio that it turned on, a restart and reconnect must leave it
 // off, and the tone must stay silent.
 //
+// Whenever sound works, the web UI's warning that sound did not start (config/novnc/ui.js,
+// checkAudioStarted) must not show: a recorder in the page notes every time it does, and each
+// part checks it once the warning's wait has passed (first use; returning through the
+// reconnect; muted). web-ui-banner.mjs checks that it does show when sound does not start.
+//
 // The two restarts run at the same time, in two runs of this script, each with its own
 // container, tab and profile. PART reconnect does first use, returning and the reconnect
 // case. PART muted turns audio on with the speaker icon as on first use (first use's checks
@@ -57,6 +62,39 @@ function tapAudio() {
     const sockets = [];
     window.__audioTaps = taps;
     window.__sockets = sockets;
+    // Every change of the web UI's sound-start warning (config/novnc/ui.js, checkAudioStarted)
+    // showing or going away: {t (performance.now()), shown}.
+    const WARNING = 'Sound did not start. Reload the page, then click in it.';
+    const warningChanges = [];
+    window.__warning = warningChanges;
+    // When the web UI connected (to the VNC server): connectFinished then turns sound back on
+    // at once after a reconnect, so ui.js's wait starts then. Page times. (The web UI connects
+    // only after DOMContentLoaded, and before it there may be no root element to observe.)
+    const connected = [];
+    window.__connectedAt = connected;
+    document.addEventListener('DOMContentLoaded', () => {
+        new MutationObserver(() => {
+            const now = document.documentElement.classList.contains('noVNC_connected');
+            if (now && (connected.length === 0 || connected[connected.length - 1].off)) {
+                connected.push({ t: performance.now() });
+            } else if (!now && connected.length > 0 && !connected[connected.length - 1].off) {
+                connected[connected.length - 1].off = true;
+            }
+        }).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    });
+    document.addEventListener('DOMContentLoaded', () => {
+        const status = document.getElementById('noVNC_status');
+        let shown = false;
+        new MutationObserver(() => {
+            const now = status.classList.contains('noVNC_open') &&
+                status.classList.contains('noVNC_status_warn') && status.textContent === WARNING;
+            if (now !== shown) {
+                shown = now;
+                warningChanges.push({ t: performance.now(), shown });
+            }
+        }).observe(status, { attributes: true, attributeFilter: ['class'], childList: true,
+            characterData: true, subtree: true });
+    });
     const connect = AudioNode.prototype.connect;
     AudioNode.prototype.connect = function (destination, ...rest) {
         if (destination instanceof AudioDestinationNode && !this.__tapped) {
@@ -142,6 +180,27 @@ const STATE = `(() => ({
     volume: document.getElementById('noVNC_setting_audio_volume').value,
     icon: document.getElementById('noVNC_audio_button_icon').className,
 }))()`;
+
+// How long after sound is turned on the web UI warns if it has not started (ui.js's
+// AUDIO_START_TIMEOUT), and how much longer a check for no warning waits (its start is taken
+// once sound is seen to be on, after ui.js started its wait, so the margin is at least this).
+const AUDIO_START_MS = 5000;
+const WARNING_MARGIN_MS = 1000;
+
+// The page's clock (performance.now()), in which the warning's changes are recorded.
+function pageNow(session) {
+    return session.evaluate('performance.now()');
+}
+
+// Waits until the warning could have shown for sound turned on at page time SINCE, then
+// resolves to the warning's changes since then (none if it did not show).
+async function warningsAfter(session, since) {
+    const left = since + AUDIO_START_MS + WARNING_MARGIN_MS - await pageNow(session);
+    if (left > 0) {
+        await sleep(left);
+    }
+    return (await session.evaluate('window.__warning')).filter(c => c.t >= since);
+}
 
 const cases = [];
 function record(name, ok, details) {
@@ -399,6 +458,8 @@ async function reconnectPart(session) {
     record('first use: a click alone leaves audio off', state.audioSockets.length === 0 &&
         state.enabled !== '1' && state.volume === '0' && state.icon.includes('fa-volume-mute'),
         state);
+    // Sound is turned on in the click's handler, so ui.js's wait starts after this.
+    const firstUseOn = await pageNow(session);
     await clickElement(session, '#noVNC_audio_button');
     await waitFor(session, AUDIO_ON, 'the audio stream opening', 15000).catch(() => {});
     state = await session.evaluate(STATE);
@@ -417,6 +478,8 @@ async function reconnectPart(session) {
     await clickRemotePage(session);
     measured = await measureUntil(session, isSilent, 10000);
     record('first use: silence after the page stops', isSilent(measured), rounded(measured));
+    let warnings = await warningsAfter(session, firstUseOn);
+    record('first use: no sound-start warning', warnings.length === 0, { warnings });
 
     // Returning user: the same profile, so localStorage keeps audio_enabled.
     await connected(session);
@@ -426,6 +489,7 @@ async function reconnectPart(session) {
         state.contexts[0] === 'suspended', state);
     // Any first click turns it back on: here the side panel's handle (a click on the
     // canvas would also reach the remote page).
+    const returningClick = await pageNow(session);
     await clickElement(session, '#noVNC_control_bar_handle');
     await waitFor(session, AUDIO_ON, 'the audio stream opening', 15000).catch(() => {});
     state = await session.evaluate(STATE);
@@ -442,6 +506,8 @@ async function reconnectPart(session) {
     let started = Date.now();
     await waitFor(session, AUDIO_ON, 'the audio stream reopening', 15000).catch(() => {});
     const reopenMs = Date.now() - started;
+    // When the tab reconnected: sound was turned back on then (connectFinished).
+    const reconnectOn = await session.evaluate('window.__connectedAt[window.__connectedAt.length - 1].t');
     state = await session.evaluate(STATE);
     record('reconnect: audio comes back on with no click', state.enabled === '1' &&
         audioOn(state), state);
@@ -463,6 +529,11 @@ async function reconnectPart(session) {
     measured = await measureUntil(session, isSilent, 10000);
     record('reconnect: silence after the page stops', stopped && isSilent(measured),
         { stopped, ...rounded(measured) });
+    // In this document, from the returning click through the restart, once the restored sound
+    // has had its wait.
+    await warningsAfter(session, reconnectOn);
+    warnings = (await session.evaluate('window.__warning')).filter(c => c.t >= returningClick);
+    record('reconnect: no sound-start warning', warnings.length === 0, { warnings });
 }
 
 async function mutedPart(session) {
@@ -513,6 +584,9 @@ async function mutedPart(session) {
         playing: tone.playing, ...rounded(tone.measured), waitedMs: negativeWaitMs(toneMs),
         reconnectCaseMs: toneMs,
     });
+    // Sound turned on, muted, and the restart: no warning in this document at any time.
+    const warnings = await session.evaluate('window.__warning');
+    record('muted: no sound-start warning', warnings.length === 0, { warnings });
     await clickInContainer(false);
 }
 
