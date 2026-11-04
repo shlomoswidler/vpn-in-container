@@ -35,8 +35,12 @@
 // in the container as soon as the tab has reconnected, and both waits run at the same time,
 // each as long as it would be alone.
 //
+// The browser starts at once, while the container boots; the checks start once run.sh writes
+// the web UI's URL to READY (browser.mjs's webUiUrl). If it writes "stop" instead, this prints
+// nothing.
+//
 // Prints {"total", "failed", "failures", "cases"}, or {"error"} if the run could not finish.
-// Usage: node web-ui-audio.mjs chrome|firefox BINARY PROFILE_DIR PORT URL CONTAINER
+// Usage: node web-ui-audio.mjs chrome|firefox BINARY PROFILE_DIR PORT READY CONTAINER
 //            reconnect|muted TIMINGS
 
 import { execFile } from 'node:child_process';
@@ -44,9 +48,11 @@ import { readFile, rename, writeFile } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 
-import { launch, waitFor } from './browser.mjs';
+import { launch, waitFor, webUiUrl } from './browser.mjs';
 
-const [kind, binary, profile, port, url, container, part, timingsFile] = process.argv.slice(2);
+const [kind, binary, profile, port, readyFile, container, part, timingsFile] = process.argv.slice(2);
+// The web UI's URL, once run.sh has it (main).
+let url;
 const run = promisify(execFile);
 const LEFT_HZ = 1000;
 const RIGHT_HZ = 1500;
@@ -590,8 +596,13 @@ async function mutedPart(session) {
     await clickInContainer(false);
 }
 
+// Runs PART once run.sh has handed over the web UI's URL; resolves to false if it said stop.
 async function main(session) {
     await session.addPreloadScript(tapAudio.toString());
+    url = await webUiUrl(readyFile);
+    if (url === null) {
+        return false;
+    }
     if (part === 'reconnect') {
         await reconnectPart(session);
     } else if (part === 'muted') {
@@ -599,14 +610,16 @@ async function main(session) {
     } else {
         throw new Error(`unknown part ${part}: reconnect or muted`);
     }
+    return true;
 }
 
 let session;
 try {
     session = await launch(kind, binary, profile, port);
-    await main(session);
-    const failures = cases.filter(c => !c.ok).map(c => c.name);
-    process.stdout.write(`${JSON.stringify({ total: cases.length, failed: failures.length, failures, cases })}\n`);
+    if (await main(session)) {
+        const failures = cases.filter(c => !c.ok).map(c => c.name);
+        process.stdout.write(`${JSON.stringify({ total: cases.length, failed: failures.length, failures, cases })}\n`);
+    }
 } catch (err) {
     process.stdout.write(`${JSON.stringify({ error: err.message, cases })}\n`);
     process.exitCode = 1;

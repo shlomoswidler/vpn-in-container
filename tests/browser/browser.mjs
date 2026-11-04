@@ -36,9 +36,13 @@
 // Each attempt to reach the browser's endpoint is limited too (ATTEMPT_TIMEOUT_MS: a hung
 // browser can accept a connection and never answer), and a browser that ignores SIGTERM on
 // close gets SIGKILL after EXIT_GRACE_MS, so that the test's process can end.
+//
+// webUiUrl(readyFile) waits for tests/browser/run.sh to hand a web UI check its URL: the
+// check's browser starts while the container boots.
 
 import { spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
@@ -361,5 +365,33 @@ export async function waitFor(session, expression, what, timeoutMs = 30000) {
             throw new Error(`${what}: not within ${timeoutMs} ms`);
         }
         await sleep(POLL_MS);
+    }
+}
+
+// How long webUiUrl waits for its file.
+const READY_TIMEOUT_MS = 600000;
+
+// The web UI's URL, once tests/browser/run.sh has written it to READY_FILE (whole, then
+// renamed). Resolves to null if run.sh wrote "stop" instead (the container did not come up,
+// or the check is skipped); rejects after READY_TIMEOUT_MS.
+export async function webUiUrl(readyFile) {
+    const deadline = Date.now() + READY_TIMEOUT_MS;
+    for (;;) {
+        let text = '';
+        try {
+            text = (await readFile(readyFile, 'utf8')).trim();
+        } catch {
+            // Not written yet.
+        }
+        if (text === 'stop') {
+            return null;
+        }
+        if (text !== '') {
+            return text;
+        }
+        if (Date.now() > deadline) {
+            throw new Error(`the web UI's URL: not in ${readyFile} within ${READY_TIMEOUT_MS} ms`);
+        }
+        await sleep(100);
     }
 }
