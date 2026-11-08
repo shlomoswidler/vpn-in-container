@@ -97,10 +97,6 @@ Optional:
 
 > **Note:** The `.env.example` includes `COMPOSE_PROJECT_NAME=vpn-in-container`. Do not remove this — it prevents Docker Compose from normalizing hyphens to underscores in volume mount paths, which would break all container configurations. See [Troubleshooting](#containers-start-with-empty-config--wrong-mount-paths) for details.
 
-> **Upgrading from an earlier version:** the API key used to be kept a second time, in
-> `config/gluetun/config.toml`. That file is no longer read, but it still holds the key in plain
-> text: delete it (`rm config/gluetun/config.toml`).
-
 ### 3. Create Downloads Directory
 
 Torrents go to `~/Downloads/vpn-in-container`, and Firefox's downloads (including `.torrent` files
