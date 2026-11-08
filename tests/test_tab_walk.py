@@ -24,9 +24,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "tests" / "e2e" / "tab_walk.sh"
 WINDOW = "8388611"
 
-# Started as `python -I -S` (no site packages: a faster start, for many calls per walk).
+# Started as `python -IS` (no site packages: a faster start, for many calls per walk). One
+# word: Linux passes a shebang's arguments as a single argument, so `-I -S` would reach
+# Python as "-I -S" and fail.
 STUB_XDOTOOL = """\
-#!{python} -I -S
+#!{python} -IS
 import json, os, sys
 path = os.environ["STUB_STATE"]
 with open(path) as f:

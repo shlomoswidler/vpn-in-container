@@ -266,10 +266,17 @@ class EnvExampleTests(unittest.TestCase):
         }
 
     def test_puid_and_pgid_guards_fire_when_unset(self):
-        result = run_compose_config(ENV_FILE, self.env)
-        self.assertNotEqual(result.returncode, 0, "config passed with PUID and PGID unset")
-        self.assertIn("required variable PUID is missing a value: Set PUID in .env", result.stderr)
-        self.assertIn("required variable PGID is missing a value: Set PGID in .env", result.stderr)
+        # One variable unset at a time: Compose v2 reports only the first missing variable
+        # (Compose v5 reports all), so each guard is checked on its own.
+        ids = {"PUID": str(os.getuid()), "PGID": str(os.getgid())}
+        for missing, present in (("PUID", "PGID"), ("PGID", "PUID")):
+            with self.subTest(unset=missing):
+                result = run_compose_config(ENV_FILE, {**self.env, present: ids[present]})
+                self.assertNotEqual(result.returncode, 0, f"config passed with {missing} unset")
+                self.assertIn(
+                    f"required variable {missing} is missing a value: Set {missing} in .env",
+                    result.stderr,
+                )
 
     def test_gluetun_api_key_guard_fires_when_empty_or_unset(self):
         # Without it, Compose would render an auth file with an empty key, and qSticky would
