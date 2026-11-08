@@ -1,0 +1,2 @@
+# ruff (Python lint and format); CI runs `ruff check` and `ruff format --check`.
+line-length = 100

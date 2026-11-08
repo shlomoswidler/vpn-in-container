@@ -362,8 +362,10 @@ class CommittedOverlayTests(unittest.TestCase):
         self.assertEqual(patched.count("    checkAudioStarted() {"), 1)
         self.assertEqual(patched.count("UI.checkAudioStarted();"), 1)
         self.assertEqual(patched.count("clearTimeout(UI.audioContext.startCheckTimer);"), 2)
-        self.assertIn('AUDIO_START_MESSAGE: "Sound did not start. Reload the page, then click in it.",',
-                      patched)
+        self.assertIn(
+            'AUDIO_START_MESSAGE: "Sound did not start. Reload the page, then click in it.",',
+            patched,
+        )
         self.assertIn("AUDIO_START_TIMEOUT: 5000,", patched)
         update = patched.index("    updateAudio() {")
         self.assertLess(patched.index("    checkAudioStarted() {"), update)

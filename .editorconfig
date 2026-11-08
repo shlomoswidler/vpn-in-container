@@ -1,0 +1,18 @@
+root = true
+
+# Shell formatting, read by shfmt (run with no formatting flags: `shfmt -d .`)
+# and by editors.
+[*.sh]
+indent_style = space
+indent_size = 4
+switch_case_indent = true
+
+# The jlesage image's /etc/services.d/app/kill with kill.patch applied: it must
+# stay exactly the recorded upstream file plus the patch (tests/image_overlays.py),
+# so it keeps upstream's formatting.
+[config/firefox-services/kill]
+ignore = true
+
+# Local notes; gitignored, not part of the repo.
+[docs/**]
+ignore = true

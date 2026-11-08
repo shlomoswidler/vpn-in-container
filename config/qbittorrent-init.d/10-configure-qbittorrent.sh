@@ -48,7 +48,7 @@ set_config() {
             if (in_section && !done) { print line; done = 1 }
             if (!seen) { print ""; print "[" section "]"; print line }
         }
-    ' "$CONF_FILE" > "$tmp" && cat "$tmp" > "$CONF_FILE"
+    ' "$CONF_FILE" >"$tmp" && cat "$tmp" >"$CONF_FILE"
     rm -f "$tmp"
 }
 
@@ -131,9 +131,9 @@ configure_watch_folder() {
     echo "[qbt-init] Adding $WATCH_DIR to the watched folders"
     tmp=$(mktemp)
     if jq --arg dir "$WATCH_DIR" --argjson entry "$WATCH_ENTRY" '. + {($dir): $entry}' \
-        <<<"$current" > "$tmp"; then
+        <<<"$current" >"$tmp"; then
         # Rewritten in place, so an existing file keeps its owner and mode.
-        cat "$tmp" > "$WATCH_FILE"
+        cat "$tmp" >"$WATCH_FILE"
         # This script runs as root, after the image has given everything in
         # /config to the user qBittorrent runs as: give the new file the same
         # owner, like the rest of /config.

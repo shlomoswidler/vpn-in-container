@@ -51,7 +51,7 @@ echo "image: $IMAGE"
 # below) and every peer-discovery method off.
 write_config() {
     mkdir -p "$1/qBittorrent"
-    cat > "$1/qBittorrent/qBittorrent.conf" <<EOF
+    cat >"$1/qBittorrent/qBittorrent.conf" <<EOF
 [BitTorrent]
 Session\\AddTorrentStopped=false
 Session\\DHTEnabled=false
@@ -145,7 +145,7 @@ fail() {
 }
 
 mkdir -p "$WORK/content" "$WORK/leecher-downloads"
-python3 -I "$QBT_DIR/make_torrent.py" "$WORK/content" "$WORK/test.torrent" > "$WORK/manifest"
+python3 -I "$QBT_DIR/make_torrent.py" "$WORK/content" "$WORK/test.torrent" >"$WORK/manifest"
 HASH=$(head -n 1 "$WORK/manifest")
 write_config "$WORK/seeder-config"
 write_config "$WORK/leecher-config"

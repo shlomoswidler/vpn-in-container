@@ -51,12 +51,12 @@ GLYPHS=(
     "top_left_corner 134 nwse-resize"
 )
 
-IMAGE=$(docker compose -f "$REPO/docker-compose.yml" config --format json \
-    | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["services"]["firefox"]["image"])')
+IMAGE=$(docker compose -f "$REPO/docker-compose.yml" config --format json |
+    python3 -I -c 'import json, sys; print(json.load(sys.stdin)["services"]["firefox"]["image"])')
 ALPINE=$(docker run --rm --network none --entrypoint sh "$IMAGE" \
     -c '. /etc/os-release && echo "${VERSION_ID%.*}"')
 echo "image: $IMAGE (Alpine $ALPINE)"
-echo "$IMAGE" > "$WORK/image.txt"
+echo "$IMAGE" >"$WORK/image.txt"
 
 echo "building fontgrab..."
 docker run --rm -v "$GLYPH_DIR/fontgrab.c:/src/fontgrab.c:ro" -v "$WORK:/out" \
@@ -90,7 +90,7 @@ for entry in "${GLYPHS[@]}"; do
     docker run --rm --network "container:$CONTAINER" \
         -v "$REPO/tests/e2e:/e2e:ro" -v "$WORK:/out" "$PROBE_IMAGE" \
         python -I /e2e/rfb_cursor_probe.py 127.0.0.1 5900 960 540 "/out/$name" \
-        > "$WORK/$name.json"
+        >"$WORK/$name.json"
     # The capture only counts if fontgrab still held its grab after the probe.
     # (BusyBox pkill -x does not match fontgrab by name, so match its command line.)
     if ! in_x pkill -f '^/capture/fontgrab '; then
@@ -98,7 +98,7 @@ for entry in "${GLYPHS[@]}"; do
         exit 1
     fi
     sleep 0.5
-    echo "$name $index $keyword" >> "$WORK/glyphs.txt"
+    echo "$name $index $keyword" >>"$WORK/glyphs.txt"
     echo "  $name: $(cat "$WORK/$name.json")"
 done
 

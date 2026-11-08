@@ -16,8 +16,8 @@ RC=${OPENBOX_RC:-/var/run/openbox/rc.xml}
 # the tests run).
 tmp=$(mktemp "$RC.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
-sed 's|<keepBorder>yes</keepBorder>|<keepBorder>no</keepBorder>|' "$RC" > "$tmp"
-cat "$tmp" > "$RC"
+sed 's|<keepBorder>yes</keepBorder>|<keepBorder>no</keepBorder>|' "$RC" >"$tmp"
+cat "$tmp" >"$RC"
 
 if ! grep -q '<keepBorder>no</keepBorder>' "$RC"; then
     echo "keepBorder is not disabled in $RC" >&2

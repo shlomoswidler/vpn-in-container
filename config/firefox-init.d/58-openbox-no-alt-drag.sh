@@ -18,8 +18,8 @@ RC=${OPENBOX_RC:-/var/run/openbox/rc.xml}
 # the tests run).
 tmp=$(mktemp "$RC.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
-sed '/<context name="Frame">/,/<\/context>/d' "$RC" > "$tmp"
-cat "$tmp" > "$RC"
+sed '/<context name="Frame">/,/<\/context>/d' "$RC" >"$tmp"
+cat "$tmp" >"$RC"
 
 if grep -q '<context name="Frame">' "$RC" || ! grep -q '<context name="Client">' "$RC"; then
     echo "could not remove the Frame mouse context from $RC" >&2
@@ -38,7 +38,7 @@ if [ "$binds" != "$readable" ]; then
     echo "cannot check $RC for Alt+drag bindings: a <mousebind> tag does not have its button and action on one line" >&2
     exit 1
 fi
-grep -n -i -E 'action="[[:space:]]*drag[[:space:]]*"' "$RC" > "$tmp" || true
+grep -n -i -E 'action="[[:space:]]*drag[[:space:]]*"' "$RC" >"$tmp" || true
 alt_button='button="([^"]*[[:space:]-])?(a|alt|mod1)-'
 if grep -q -i -E "$alt_button" "$tmp"; then
     echo "Openbox still has an Alt+drag binding in $RC:" >&2
