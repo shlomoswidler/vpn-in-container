@@ -1,5 +1,9 @@
 # Containerized VPN Browser Stack
 
+[![CI](https://img.shields.io/github/actions/workflow/status/shlomoswidler/vpn-in-container/ci.yml?branch=main&event=push&label=CI&logo=github)](https://github.com/shlomoswidler/vpn-in-container/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/shlomoswidler/vpn-in-container)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/shlomoswidler/vpn-in-container)](https://github.com/shlomoswidler/vpn-in-container/commits/main)
+
 A Docker Compose stack providing a privacy-focused, containerized browsing environment. Routes Firefox and qBittorrent through a WireGuard VPN with automatic kill switch, health monitoring, and self-healing recovery.
 
 ## Features
@@ -521,6 +525,25 @@ node --test tests/ && python3 -m unittest discover -s tests   # unit tests
 
 `tests/stack/run.sh` changes nothing permanently: it restores qBittorrent's listening port
 and removes its test torrent and test containers.
+
+### Continuous Integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request, on GitHub's
+standard Ubuntu runners (free for public repositories). It runs the checks that need neither
+the VPN nor macOS:
+
+- lint: ShellCheck, shfmt (settings in `.editorconfig`), `ruff check` and `ruff format --check`
+  (settings in `ruff.toml`), and actionlint on the workflow itself
+- the unit tests
+- `tests/qbittorrent/fresh-install.sh` and `tests/qbittorrent/download.sh`
+
+The e2e, browser and stack suites do not run there. The lint tools run from the images pinned
+in the workflow, so the same checks run locally with, for example:
+
+```bash
+docker run --rm -v "$PWD:/mnt:ro" -w /mnt mvdan/shfmt:v3.14.1 -d .
+docker run --rm -v "$PWD:/io:ro" -w /io ghcr.io/astral-sh/ruff:0.17.2 format --check .
+```
 
 ### Test VPN Connection
 

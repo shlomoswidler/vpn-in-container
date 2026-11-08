@@ -1,0 +1,102 @@
+# Lint and the tests that need neither the VPN nor macOS: the unit tests and the
+# qBittorrent image's tests. The e2e, browser and stack suites are not run here
+# (README.md, "Automated Tests").
+#
+# Actions are pinned to commit SHAs and the lint images to digests, as
+# docker-compose.yml pins its images; the comment beside each pin names its version.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SHELLCHECK_IMAGE: koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
+  SHFMT_IMAGE: mvdan/shfmt:v3.14.1@sha256:8c06884a35683d8763fba6c0d9484d11a61a96da65f8d497d6f625825a6043f2
+  RUFF_IMAGE: ghcr.io/astral-sh/ruff:0.17.2@sha256:d69a8c8d529a866a6aaea0dfda672693d68671a08827db765514abc1571a78a0
+  ACTIONLINT_IMAGE: rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: ShellCheck
+        run: |
+          git ls-files -z '*.sh' |
+              xargs -0 docker run --rm --network none -v "$PWD:/mnt:ro" -w /mnt "$SHELLCHECK_IMAGE"
+
+      - name: shfmt (settings in .editorconfig)
+        run: docker run --rm --network none -v "$PWD:/mnt:ro" -w /mnt "$SHFMT_IMAGE" -d .
+
+      - name: ruff check
+        run: docker run --rm --network none -v "$PWD:/io:ro" -w /io "$RUFF_IMAGE" check --no-cache .
+
+      - name: ruff format
+        run: docker run --rm --network none -v "$PWD:/io:ro" -w /io "$RUFF_IMAGE" format --no-cache --check .
+
+      - name: actionlint
+        run: docker run --rm --network none -v "$PWD:/repo:ro" -w /repo "$ACTIONLINT_IMAGE" -color
+
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+
+      # 26: `node --test tests/` (a directory) needs it; Node 24 reads the
+      # argument as a module path and fails.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+
+      - name: Node tests
+        run: node --test tests/
+
+      - name: Python tests
+        run: python3 -m unittest discover -s tests
+
+  qbittorrent:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+
+      # The tests read docker-compose.yml through `docker compose config`, which
+      # needs a .env and a PUID and PGID (left empty in .env.example).
+      - name: Create .env
+        run: |
+          cp .env.example .env
+          echo "PUID=$(id -u)" >>"$GITHUB_ENV"
+          echo "PGID=$(id -g)" >>"$GITHUB_ENV"
+
+      - name: Fresh-install test
+        run: tests/qbittorrent/fresh-install.sh
+
+      - name: Download test
+        run: tests/qbittorrent/download.sh
